@@ -65,7 +65,8 @@ static std::tuple<int, int, int>
 get_default_recipe(const torch::ScalarType& sfa_dtype, const torch::ScalarType& sfb_dtype) {
     const auto arch_major = device_runtime->get_arch_major();
     if (arch_major == 9) {
-        DG_HOST_ASSERT(sfa_dtype == torch::kFloat and sfb_dtype == torch::kFloat);
+        // SFA may be packed UE8M0 (INT, 1, 128); it is unpacked to FP32 in `transform_sf_into_required_layout`
+        DG_HOST_ASSERT((sfa_dtype == torch::kFloat or sfa_dtype == torch::kInt) and sfb_dtype == torch::kFloat);
         return {1, 128, 128};
     } else if (arch_major == 10) {
         DG_HOST_ASSERT(sfb_dtype == torch::kFloat or sfb_dtype == torch::kInt);
