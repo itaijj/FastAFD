@@ -82,7 +82,10 @@
 
 ### Sub-Task 3: Single-GPU SM90 expert-path unit test
 
-- **Status:** [~] created, awaiting H100 run
+- **Status:** [x] done (PASS on H100 80GB HBM3, k8s pod `h100-psum-moe-test`, commit `a195bc9`)
+- **Result:** `PASS: calc_diff=3.520e-04 max_abs=6.399e-01 finite=True m=769 counts=[37, 0, 130, 5, 256, 1] alignment=128`
+- **Fix found while running:** with nvcc 13, the tvm_ffi JIT kernels (`per_token_fp8_packed`, `psum_silu_mul_fp8_packed`, ...) failed in NVVM with `Call parameter type does not match function signature!` on `std::source_location::current()` and `parse Invalid record`. The cause is the nvcc 12.1 `consteval -> constexpr` workaround in `kernel/csrc/include/minisgl/utils.h`: together with `--expt-relaxed-constexpr` it makes `source_location::current()` device-visible. The workaround now applies only when `__CUDACC_VER_MAJOR__ < 13`. All 7 JIT kernels and the DeepGEMM extension compile with nvcc 13 (`docker/h100/jit_compile_check.sh`).
+- **How to rerun:** `GPU_COUNT=1 bash docker/h100/k8s/deploy_test.sh` (one-shot pod; base image `nvidia/cuda:13.0.2-devel-ubuntu24.04`, deps installed with uv at startup).
 - **Implementation notes:**
   - Location: `scripts/validate/test_h100_deepgemm_psum_moe.py`. The repo has no `tests/`; move it if preferred. `py_compile` passes.
   - Run: `python scripts/validate/test_h100_deepgemm_psum_moe.py`. It skips on non-SM90.
