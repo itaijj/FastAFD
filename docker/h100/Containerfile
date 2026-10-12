@@ -6,7 +6,7 @@
 #   podman build -t fastafd-h100 -f docker/h100/Containerfile .
 # Run the SM90 expert-path test (needs NVIDIA CDI: nvidia-ctk cdi generate):
 #   podman run --rm --device nvidia.com/gpu=0 fastafd-h100
-FROM docker.io/nvidia/cuda:13.0.0-devel-ubuntu24.04
+FROM docker.io/nvidia/cuda:13.0.2-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \

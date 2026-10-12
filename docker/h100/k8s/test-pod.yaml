@@ -7,6 +7,13 @@ metadata:
     role: h100-test
 spec:
   restartPolicy: Never
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - {key: nvidia.com/gpu.product, operator: In, values: ["NVIDIA-H100-80GB-HBM3"]}
+              - {key: kubernetes.io/hostname, operator: NotIn, values: [${TEMPLATE_EXCLUDE_NODES}]}
   securityContext:
     fsGroup: ${TEMPLATE_FSGROUP}
   volumes:
@@ -47,15 +54,15 @@ spec:
         - {name: work, mountPath: /work}
   containers:
     - name: test
-      image: docker.io/nvidia/cuda:13.0.0-devel-ubuntu24.04
+      image: docker.io/nvidia/cuda:13.0.2-devel-ubuntu24.04
       command: ["/bin/bash", "/entry/pod_entry.sh"]
       resources:
         requests:
-          nvidia.com/gpu: "1"
+          nvidia.com/gpu: "${TEMPLATE_GPU}"
           cpu: "16"
           memory: 64Gi
         limits:
-          nvidia.com/gpu: "1"
+          nvidia.com/gpu: "${TEMPLATE_GPU}"
           cpu: "32"
           memory: 128Gi
       volumeMounts:

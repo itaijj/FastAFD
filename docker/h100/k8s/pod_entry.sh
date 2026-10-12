@@ -9,7 +9,7 @@ set -uo pipefail
 export HOME=/work/home PATH=/work/bin:$PATH
 export UV_CACHE_DIR=/work/uv-cache UV_PYTHON_INSTALL_DIR=/work/python
 export CUDA_HOME=/usr/local/cuda CUDA_PATH=/usr/local/cuda
-export CUDA_NVCC_EXECUTABLE=/usr/local/cuda/bin/nvcc TORCH_CUDA_ARCH_LIST=9.0a
+export CUDA_NVCC_EXECUTABLE=/usr/local/cuda/bin/nvcc TORCH_CUDA_ARCH_LIST=9.0a TVM_FFI_CUDA_ARCH_LIST=9.0
 export MINISGL_LOCAL_CACHE_BASE=/work/cache MINISGL_DEEPGEMM_BUILD_DIR=/work/cache/deepgemm
 export TVM_FFI_CACHE_DIR=/work/cache/tvm_ffi MAX_JOBS="${MAX_JOBS:-16}"
 mkdir -p "$HOME" /work/cache

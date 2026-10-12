@@ -10,6 +10,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export TEMPLATE_POD="${POD_NAME:-h100-psum-moe-test}"
 export TEMPLATE_REPO="${REPO_URL:-https://github.com/itaijj/FastAFD.git}"
 export TEMPLATE_BRANCH="${BRANCH:-h100-deepep-baseline}"
+export TEMPLATE_GPU="${GPU_COUNT:-1}"
+# Nodes known to fail CUDA init (error 802: fabric manager not up), comma-separated.
+EXCLUDE_NODES="${EXCLUDE_NODES:-pokprod-b93r43s1}"
+export TEMPLATE_EXCLUDE_NODES="\"${EXCLUDE_NODES//,/\", \"}\""
 
 NS="$(kubectl config view --minify -o jsonpath='{..namespace}')"
 FS_GROUP="$(kubectl get ns "$NS" \
@@ -17,12 +21,12 @@ FS_GROUP="$(kubectl get ns "$NS" \
   | cut -d/ -f1)"
 export TEMPLATE_FSGROUP="${FS_GROUP:-1000}"
 
-echo "namespace=$NS pod=$TEMPLATE_POD repo=$TEMPLATE_REPO@$TEMPLATE_BRANCH fsGroup=$TEMPLATE_FSGROUP"
+echo "namespace=$NS pod=$TEMPLATE_POD gpus=$TEMPLATE_GPU repo=$TEMPLATE_REPO@$TEMPLATE_BRANCH fsGroup=$TEMPLATE_FSGROUP"
 
 kubectl create configmap "${TEMPLATE_POD}-entry" --from-file=pod_entry.sh="$HERE/pod_entry.sh" \
   --dry-run=client -o yaml | kubectl apply -f -
 kubectl delete pod "$TEMPLATE_POD" --ignore-not-found
-envsubst '${TEMPLATE_POD} ${TEMPLATE_FSGROUP} ${TEMPLATE_REPO} ${TEMPLATE_BRANCH}' \
+envsubst '${TEMPLATE_POD} ${TEMPLATE_FSGROUP} ${TEMPLATE_REPO} ${TEMPLATE_BRANCH} ${TEMPLATE_GPU} ${TEMPLATE_EXCLUDE_NODES}' \
   < "$HERE/test-pod.yaml" | kubectl apply -f -
 
 # Bounded wait for the pod to leave Pending (unschedulable pods never fail).
