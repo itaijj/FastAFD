@@ -1,0 +1,8 @@
+.git
+**/__pycache__
+**/*.egg-info
+build/
+dist/
+cache/
+*.nsys-rep
+*.ncu-rep
