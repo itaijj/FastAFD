@@ -41,6 +41,13 @@ uv pip install --python "$PY" --index-strategy unsafe-best-match \
   "setuptools>=75" wheel ninja fastapi uvicorn pyzmq msgpack "pydantic>=2" \
   prompt_toolkit openai \
   || fail "pip install"
+if [ "${RUN_VLLM_ALIGNMENT:-0}" = "1" ]; then
+  echo "=== installing vLLM 0.19.0+cu130 (alignment) ==="
+  uv pip install --python "$PY" --index-strategy unsafe-best-match \
+    --extra-index-url https://download.pytorch.org/whl/cu130 \
+    "https://github.com/vllm-project/vllm/releases/download/v0.19.0/vllm-0.19.0+cu130-cp38-abi3-manylinux_2_35_x86_64.whl" \
+    || fail "vllm install"
+fi
 uv pip install --python "$PY" --reinstall --no-deps \
   "nvidia-nccl-cu13==2.30.4" "setuptools==80.10.2" "fsspec==2026.2.0" \
   || fail "pip overrides"

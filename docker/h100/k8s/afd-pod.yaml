@@ -69,7 +69,7 @@ spec:
         - {name: NUM_PROMPTS, value: "${TEMPLATE_NUM_PROMPTS}"}
         - {name: PROMPT_LEN, value: "${TEMPLATE_PROMPT_LEN}"}
         - {name: MAX_TOKENS, value: "${TEMPLATE_MAX_TOKENS}"}
-        - {name: RUN_VLLM_ALIGNMENT, value: "0"}
+        - {name: RUN_VLLM_ALIGNMENT, value: "${TEMPLATE_VLLM_ALIGN}"}
         - {name: HF_HOME, value: "/models/.hf_home"}
         - {name: KEEP_ALIVE_S, value: "${TEMPLATE_KEEP_ALIVE_S}"}
       resources:
