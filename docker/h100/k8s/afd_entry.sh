@@ -19,6 +19,9 @@ export CUDA_NVCC_EXECUTABLE=/usr/local/cuda/bin/nvcc TORCH_CUDA_ARCH_LIST=9.0a
 export MAX_JOBS="${MAX_JOBS:-16}" RAY_TMPDIR=/tmp/ray RAY_DEDUP_LOGS=0
 export CONDA_DEFAULT_ENV=minisgl-cuda130   # satisfies the driver's env-name check
 export PYTHONUNBUFFERED=1
+# One node, all GPUs on NVLink: DeepEP does not need NCCL GIN (the pod has no RDMA
+# userspace stack, so ncclCommQueryProperties reports GIN type NONE).
+export EP_DISABLE_GIN="${EP_DISABLE_GIN:-1}"
 mkdir -p "$HOME" /work/bin /tmp/ray
 
 fail() { echo "ERROR: $*"; echo "=== AFD RUN FAIL ==="; exit 1; }

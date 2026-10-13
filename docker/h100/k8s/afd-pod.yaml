@@ -75,10 +75,12 @@ spec:
       resources:
         requests:
           nvidia.com/gpu: "${TEMPLATE_GPU}"
+          rdma/roce_gdr: "${TEMPLATE_RDMA}"
           cpu: "32"
           memory: 200Gi
         limits:
           nvidia.com/gpu: "${TEMPLATE_GPU}"
+          rdma/roce_gdr: "${TEMPLATE_RDMA}"
           cpu: "64"
           memory: 400Gi
       volumeMounts:

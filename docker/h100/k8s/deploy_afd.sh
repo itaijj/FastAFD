@@ -23,6 +23,8 @@ export TEMPLATE_NUM_PROMPTS="${NUM_PROMPTS:-32}"
 export TEMPLATE_PROMPT_LEN="${PROMPT_LEN:-512}"
 export TEMPLATE_MAX_TOKENS="${MAX_TOKENS:-8}"
 export TEMPLATE_KEEP_ALIVE_S="${KEEP_ALIVE_S:-900}"
+# DeepEP ElasticBuffer needs NCCL GIN, which needs the RDMA devices in the pod.
+export TEMPLATE_RDMA="${RDMA:-1}"
 # Nodes known to fail CUDA init (error 802), comma-separated.
 EXCLUDE_NODES="${EXCLUDE_NODES:-pokprod-b93r43s1}"
 export TEMPLATE_EXCLUDE_NODES="\"${EXCLUDE_NODES//,/\", \"}\""
@@ -39,5 +41,5 @@ kubectl get pvc "$TEMPLATE_PVC" >/dev/null
 kubectl create configmap "${TEMPLATE_POD}-entry" --from-file=afd_entry.sh="$HERE/afd_entry.sh" \
   --dry-run=client -o yaml | kubectl apply -f -
 kubectl delete pod "$TEMPLATE_POD" --ignore-not-found
-envsubst '${TEMPLATE_POD} ${TEMPLATE_FSGROUP} ${TEMPLATE_REPO} ${TEMPLATE_BRANCH} ${TEMPLATE_PVC} ${TEMPLATE_GPU} ${TEMPLATE_ATTN_DP} ${TEMPLATE_ATTN_TP} ${TEMPLATE_MLP_DP} ${TEMPLATE_EP} ${TEMPLATE_NUM_PROMPTS} ${TEMPLATE_PROMPT_LEN} ${TEMPLATE_MAX_TOKENS} ${TEMPLATE_KEEP_ALIVE_S} ${TEMPLATE_EXCLUDE_NODES}' \
+envsubst '${TEMPLATE_POD} ${TEMPLATE_FSGROUP} ${TEMPLATE_REPO} ${TEMPLATE_BRANCH} ${TEMPLATE_PVC} ${TEMPLATE_GPU} ${TEMPLATE_ATTN_DP} ${TEMPLATE_ATTN_TP} ${TEMPLATE_MLP_DP} ${TEMPLATE_EP} ${TEMPLATE_NUM_PROMPTS} ${TEMPLATE_PROMPT_LEN} ${TEMPLATE_MAX_TOKENS} ${TEMPLATE_KEEP_ALIVE_S} ${TEMPLATE_RDMA} ${TEMPLATE_EXCLUDE_NODES}' \
   < "$HERE/afd-pod.yaml" | kubectl apply -f -

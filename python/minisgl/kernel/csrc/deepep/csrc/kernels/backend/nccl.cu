@@ -84,8 +84,11 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
     // Query NCCL supported Gin Type
     ncclCommProperties props = NCCL_COMM_PROPERTIES_INITIALIZER;
     NCCL_CHECK(ncclCommQueryProperties(comm, &props));
+    // `EP_DISABLE_GIN=1` (single NVLink domain, e.g. one H100 node without RDMA
+    // userspace libs) skips GIN setup below, so GIN availability is not required.
     EP_HOST_ASSERT(
-        (allow_hybrid_mode ? props.railedGinType : props.ginType) != NCCL_GIN_TYPE_NONE and
+        (get_env("EP_DISABLE_GIN", 0) != 0 or
+         (allow_hybrid_mode ? props.railedGinType : props.ginType) != NCCL_GIN_TYPE_NONE) and
         "NCCL GIN is unavailable. This is usually due to a network configuration issue, "
         "such as `allow_hybrid_mode=0` (disable direct RDMA kernels) in multi-plane network.");
 
