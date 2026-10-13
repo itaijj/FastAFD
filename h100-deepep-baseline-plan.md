@@ -144,7 +144,19 @@
 
 ### Sub-Task 5: End-to-end H100 bring-up and alignment validation
 
-- **Status:** [ ] pending
+- **Status:** [-] in progress. The AFD run and the vLLM alignment both PASS on 2 AG + 2 EG (H100, k8s pod `h100-afd-run`, commit `3e138ee`). The 4 AG + 4 EG topology and a realistic-prompt alignment run are still to be done.
+- **Findings so far (k8s run on `pokprod-b93r43s3`, namespace `itai-ds2`):**
+  - Pod entry: `docker/h100/k8s/afd_entry.sh`; deploy with `docker/h100/k8s/deploy_afd.sh`; status helper `docker/h100/k8s/status.sh`.
+  - **Ray raylet crash (fixed):** `ray start --num-cpus=$(nproc)` advertised the node's 224 CPUs. Ray prestarted about one worker per CPU and `pthread_create` failed with `EAGAIN`, which killed the raylet. Now capped via `RAY_CPUS` (default 32).
+  - **DeepEP `ElasticBuffer` on H100 (fixed):** the constructor asserts `ncclCommQueryProperties().railedGinType != NONE` (`kernels/backend/nccl.cu`). The pod has the RDMA devices (after requesting `rdma/roce_gdr`), but NCCL GIN is still unavailable, so the assert fails.
+    - Fix: the assert is skipped when `EP_DISABLE_GIN=1`. The existing code already skips `ginContextCount` setup for that variable, so single-node NVLink use needs no GIN.
+    - `EP_DISABLE_GIN` is added to the Ray env passthrough lists (`supervisor_ray.py`, `afd_support.py`). The pod entry exports `EP_DISABLE_GIN=1`.
+    - The pod requests `rdma/roce_gdr: 1` (`RDMA` knob in `deploy_afd.sh`). This is harmless but was not enough alone.
+  - **Result with the fixes:** all 4 ranks initialise, the DeepEP and DeepGEMM extensions JIT-build, AG and EG decode CUDA graphs are captured for bs 8/16/32/64 and replayed, all 32 prompts generate 8 tokens each, and the script prints `=== AFD RUN PASS ===`.
+  - **vLLM alignment (2 AG + 2 EG, `RUN_VLLM_ALIGNMENT=1`, vLLM 0.19.0+cu130 x86_64 wheel, Triton MoE, enforce-eager, 1 GPU):** 32 prompts, 256 generated tokens; `overall_top1_agreement_rate=1.0`, `overall_top10_hit_rate=1.0`, `overall_top100_hit_rate=1.0`, `overall_avg_rank_in_vllm=1.0`, `overall_max_rank_in_vllm=1.0`. This meets the default `ALIGN_MIN_TOP10_RATE=1.0`.
+  - **Caveat:** this run used `PROMPT_KIND=hello` (repeated "hello"), 512-token prompts and 8 output tokens, so it is an easy case. A `realistic` prompt run (downloads text, needs internet) is still needed before calling alignment fully validated.
+  - **4 AG + 4 EG not run yet:** no single H100 node had 8 free GPUs (GPUs are shared; the most free on one node was 7). Run it with `ATTN_DP=1 ATTN_TP=4 MLP_DP=4 EP=4 GPU_COUNT=8 RUN_VLLM_ALIGNMENT=1 bash docker/h100/k8s/deploy_afd.sh` when a node frees up (`docker/h100/k8s/gpu_free.sh`).
+  - Not measured: decode step time (the run had `NSYS=0` and no timing capture).
 - **Intent:** Prove the full AFD pipeline runs on H100 and gives output aligned with vLLM. Fix any remaining SM90 issues that can only be seen at runtime.
 - **Expected Outcomes:**
   - The Sub-Task 4 script completes:
