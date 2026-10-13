@@ -1,0 +1,90 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${TEMPLATE_POD}
+  labels:
+    app: vllm-h100
+spec:
+  selector:
+    role: h100-vllm
+    pod-name: ${TEMPLATE_POD}
+  ports:
+    - {name: http, port: ${TEMPLATE_PORT}, targetPort: ${TEMPLATE_PORT}, protocol: TCP}
+---
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${TEMPLATE_POD}
+  labels:
+    app: vllm-h100
+    role: h100-vllm
+    pod-name: ${TEMPLATE_POD}
+spec:
+  restartPolicy: Never
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - {key: nvidia.com/gpu.product, operator: In, values: ["NVIDIA-H100-80GB-HBM3"]}
+              - {key: kubernetes.io/hostname, operator: NotIn, values: [${TEMPLATE_EXCLUDE_NODES}]}
+  securityContext:
+    fsGroup: ${TEMPLATE_FSGROUP}
+  volumes:
+    - name: work
+      emptyDir: {}
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 8Gi
+    - name: model-storage
+      persistentVolumeClaim:
+        claimName: ${TEMPLATE_PVC}
+    - name: entry
+      configMap:
+        name: ${TEMPLATE_POD}-entry
+  initContainers:
+    - name: fetch-uv
+      image: docker.io/curlimages/curl:latest
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -e
+          mkdir -p /work/bin
+          curl -fsSL https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-musl.tar.gz \
+            | tar -xz -C /work/bin --strip-components=1
+          /work/bin/uv --version
+      volumeMounts:
+        - {name: work, mountPath: /work}
+  containers:
+    - name: vllm
+      image: docker.io/nvidia/cuda:13.0.2-devel-ubuntu24.04
+      command: ["/bin/bash", "/entry/vllm_entry.sh"]
+      env:
+        - {name: MODEL_PATH,              value: "${TEMPLATE_MODEL}"}
+        - {name: VLLM_PORT,               value: "${TEMPLATE_PORT}"}
+        - {name: VLLM_TP_SIZE,            value: "${TEMPLATE_GPU}"}
+        - {name: VLLM_MAX_MODEL_LEN,      value: "${TEMPLATE_MAXLEN}"}
+        - {name: VLLM_EXTRA_ARGS,         value: "${TEMPLATE_EXTRA_ARGS}"}
+        - {name: HF_HOME,                 value: "/models/.hf_home"}
+        - {name: KEEP_ALIVE_S,            value: "${TEMPLATE_KEEP_ALIVE_S}"}
+        - {name: VLLM_WAIT_READY_TIMEOUT, value: "1800"}
+      resources:
+        requests:
+          nvidia.com/gpu: "${TEMPLATE_GPU}"
+          cpu: "16"
+          memory: 80Gi
+        limits:
+          nvidia.com/gpu: "${TEMPLATE_GPU}"
+          cpu: "32"
+          memory: 200Gi
+      ports:
+        - containerPort: ${TEMPLATE_PORT}
+          name: http
+          protocol: TCP
+      volumeMounts:
+        - {name: work,          mountPath: /work}
+        - {name: dshm,          mountPath: /dev/shm}
+        - {name: model-storage, mountPath: /models}
+        - {name: entry,         mountPath: /entry, readOnly: true}
