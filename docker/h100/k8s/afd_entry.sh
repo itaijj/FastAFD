@@ -111,8 +111,12 @@ from huggingface_hub import snapshot_download
 print(snapshot_download(sys.argv[1]))" "$MODEL" || fail "model download"
 
 # --- Ray head + AFD run -------------------------------------------------------
-echo "=== ray start (gpus=$GPU_COUNT) ==="
-ray start --head --num-gpus="$GPU_COUNT" --num-cpus="$(nproc)" \
+# nproc reports the whole node (e.g. 224). Ray prestarts ~1 worker per CPU, and
+# that exhausts the node's thread limit (pthread_create EAGAIN kills the raylet),
+# so advertise only a small CPU count; each AFD rank actor needs 1 CPU.
+RAY_CPUS="${RAY_CPUS:-32}"
+echo "=== ray start (gpus=$GPU_COUNT cpus=$RAY_CPUS) ==="
+ray start --head --num-gpus="$GPU_COUNT" --num-cpus="$RAY_CPUS" \
   --object-store-memory=2000000000 --include-dashboard=false --disable-usage-stats \
   || fail "ray start"
 
