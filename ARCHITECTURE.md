@@ -25,14 +25,25 @@ the megakernels and other kernels relate to the AFD serving pipeline.
    - [Layer primitives](#layer-primitives)
    - [MoE layer internals](#moe-layer-internals)
    - [AFD model splits](#afd-model-splits)
+   - [FFN-only model loading and DeviceModelView](#ffn-only-model-loading-and-devicemodelview)
 7. [Serving Stack](#serving-stack)
    - [Server and supervisor](#server-and-supervisor)
    - [Engine](#engine)
    - [Scheduler](#scheduler)
    - [KV cache](#kv-cache)
 8. [Micro-Batch Ping-Pong Pipeline](#micro-batch-ping-pong-pipeline)
-9. [Component Dependency Graph](#component-dependency-graph)
-10. [Environment Variables Reference](#environment-variables-reference)
+9. [Execution Contracts](#execution-contracts)
+   - [Service lifecycle states](#service-lifecycle-states)
+   - [ControlPlane — sync vs async AFD coordination](#controlplane--sync-vs-async-afd-coordination)
+   - [Submission and completion distinction](#submission-and-completion-distinction)
+   - [GPU internal layer/lane loop](#gpu-internal-layerlane-loop)
+   - [MegakernelExecutor interface](#megakernelexecutor-interface)
+   - [Startup sequence](#startup-sequence)
+   - [Warmup contract](#warmup-contract)
+   - [CUDA graph policy](#cuda-graph-policy)
+   - [Communication domain taxonomy](#communication-domain-taxonomy)
+10. [Component Dependency Graph](#component-dependency-graph)
+11. [Environment Variables Reference](#environment-variables-reference)
 
 ---
 
@@ -434,6 +445,49 @@ adapter, not in the model file. `models/afd.py` provides the shared
 `ModelStageState` dataclass and the `extract_stage_state_dict` utility for
 loading per-stage weights from a full checkpoint.
 
+### FFN-only model loading and DeviceModelView
+
+When the EG worker loads weights it performs an FFN-only load: only the
+parameters that belong to the current rank's expert slice are materialized.
+The loading pipeline is:
+
+```
+checkpoint config
+  → model adapter parses model config + parallel config → builds FFNModel
+  → constructs per-rank weight holders according to expert placement
+  → loads only the FFN parameters and quantization metadata for this rank
+  → converts to the layout required by the kernel (e.g. UE8M0 FP8 block scaling)
+  → generates per-layer device weight descriptors, addresses, and layer index map
+  → validates completeness → outputs DeviceModelView
+  → original upstream layer objects may be released; FFNModel retains
+    the converted weights and descriptors
+```
+
+**FFNModel internal composition:**
+
+| Field | Content |
+|---|---|
+| `model_config` | Model structure, layer set, routing semantics, quantization config |
+| `parallel_config` | Weight sharding rules, expert placement, this-rank ownership |
+| `weights` | This rank's FFN weights + scales, converted and held in kernel layout |
+| `weight_descriptors` | Device descriptors, addresses, and layer-index mapping derived from `weights` |
+
+**DeviceModelView** is a borrowed view over FFNModel's already-loaded resources
+— not a second copy. At minimum it exposes:
+
+- Per-layer expert weights and scales.
+- Mapping from layer id to the kernel's compact layer index.
+- TMA / other hardware descriptors required by the kernel.
+- Local expert range and model generation marker.
+- Lifecycle constraints and supported input semantics.
+
+`MegakernelExecutor` borrows the device view but must not cause FFNModel to
+release its underlying tensors early.
+
+If the checkpoint-to-kernel layout conversion involves re-quantization (not a
+lossless reformat), precision validation must be done explicitly; it cannot be
+called a lossless conversion.
+
 ---
 
 ## Serving Stack
@@ -521,6 +575,245 @@ latency.
 The number of micro-batches is set by `--afd-num-micro-batches` (default 2).
 Each attention worker maintains a ring of in-flight micro-batch slots; EG
 workers have corresponding slots indexed by micro-batch id.
+
+---
+
+## Execution Contracts
+
+This section captures behavioral contracts that govern how the EG worker
+(analogous to `FFNService`/`FFNWorker`/`FFNModelRunner` in the design) operates.
+These apply to both the current FastAFD implementation and any future port.
+
+### Service lifecycle states
+
+The EG serving process moves through a well-defined state machine:
+
+```
+STARTING → INITIALIZING → CONNECTING → PREPARING → READY → STOPPING → STOPPED
+```
+
+Any active state can transition to `FAILED`. Waiting for the next step plan or
+async input is normal operation — it does not indicate inactivity.
+
+**Management API endpoints** (independent of the ControlPlane):
+
+| Endpoint | Responsibility | Semantics |
+|---|---|---|
+| `GET /health` | Liveness check | Fast local read; no GPU sync or collective; does not imply readiness to run FFN |
+| `GET /ready` | Readiness check | Checks session, model, communication, and execution resources; returns non-ready during init, shutdown, or failure; normal wait for input is still ready |
+| `GET /status` | Service status | Session, rank, phase, in-flight executions, recent completion progress, errors, profiling state |
+| `POST /profiling/start` | Start capture | Returns an operation id and status (pending / active / failed); accepted ≠ active |
+| `POST /profiling/stop` | Stop capture and flush trace | Returns operation status; reports complete only after output is written; unfinished output must not be reported as stopped |
+
+The management API is independent of the AFD ControlPlane. Even when
+`control_plane is None`, health/status and profiling remain available. Management
+commands travel via a local management channel from Service → Worker → Runner;
+they do not forge StepPlan messages and do not require a ControlPlane.
+
+**Profiling execution path:**
+
+```
+HTTP start/stop
+  → Service validates and registers the operation
+  → local management command channel
+  → Worker / Runner applies at a backend-permitted execution boundary
+  → platform profiler adapter executes start/stop and flushes trace
+  → updates operation status, actual effective boundary, and output path
+```
+
+HTTP handlers must not call device profilers directly from an arbitrary thread
+or block waiting for CUDA. Only report `active` after capture has actually
+started; only report stop complete after output has been fully written. Repeated
+start/stop calls should be idempotent or report a conflict explicitly.
+
+**Multi-rank deployment:** each rank exposes its own addressable management
+endpoint. Rank 0 health or profiling success does not imply the whole FFN job
+succeeded. A deployment layer may aggregate per-rank statuses; partial failures
+must be reported as partial failures, not overall success.
+
+### ControlPlane — sync vs async AFD coordination
+
+The ControlPlane is an optional component of the Runner/coordinator that
+carries step plans between the Attention side and the FFN side.
+
+| Mode | ControlPlane | Execution driver |
+|---|---|---|
+| **AFD sync** | present | Coordinator sends `StepPlan`; FFN side receives, validates, submits to Executor, returns completion |
+| **AFD async** | `None` | Executor advances by data-readiness and device signals; no host-level plan message per step |
+
+Whether AFD is sync or async is **independent** of whether the megakernel is
+used. The megakernel does not require a ControlPlane.
+
+**When `control_plane is None`**, the following responsibilities still exist —
+they are just handled differently:
+
+- Session and capability validation are performed by the Executor's communication
+  initialization protocol (version/layout checks are never skipped).
+- Input publication, ordering, and backpressure are expressed via data metadata,
+  buffer credits, or device signals.
+- Executor exposes execution completion and faults; Runner updates service state
+  without sending a step ACK that has no receiver.
+- Service provides a local stop signal; Executor drains or aborts as its
+  capability allows. Cross-endpoint stop is handled via device protocol or
+  disconnection — not by waiting for a flush/stop command that will never arrive.
+
+`None` is an explicitly supported deployment mode, not a degraded one. However,
+only an Executor combination that has declared and validated data-driven
+capability may use the no-ControlPlane mode. The current FastAFD step-plan path
+still requires a ControlPlane.
+
+### Submission and completion distinction
+
+Four states must be distinguished for each step:
+
+1. **Command received** — the host-side plan or signal has been accepted.
+2. **Kernel submitted** — the kernel launch has been issued to the CUDA stream.
+3. **Kernel completed** — the CUDA event associated with this step has fired on
+   its stream.
+4. **Step collectable** — the controlling side (coordinator or Attention worker)
+   may reclaim AG buffers and declare the step done.
+
+The FFN completion event marks that the FFN kernel has finished on its stream.
+The Attention-side combine completion depends on the two-endpoint protocol —
+"FFN launch returned" is not sufficient to allow AG buffer reuse.
+
+Submission must respect a bounded in-flight window (backpressure). Exceeding
+the window requires the submitter to wait; unbounded CUDA launch queuing is
+not acceptable.
+
+### GPU internal layer/lane loop
+
+A single megakernel step launch covers all registered layers and lanes:
+
+```
+one step launch:
+  initialize execution resources for this step
+  for layer in registered_layers:
+    select weight descriptor for this layer
+    for lane in active_lanes:
+      wait for matching input publication / phase signal
+      pull FP8 input tokens and routing metadata from AG ranks
+      execute fused expert computation (gate+up → SwiGLU → down)
+      write BF16 expert outputs into the target AG combine buffer
+      complete device synchronization and buffer-reuse condition for this lane
+  return
+```
+
+Layer order, lane order, and two-endpoint matching behavior are part of the
+execution protocol. Placing a different layer's or step's tokens into the
+same slot and relying on "data is already there" for the kernel to infer
+its identity is not valid.
+
+A single host plan corresponds to multiple layers and lanes but does not span
+unbounded decode steps. Long-running resident kernels, arbitrary task queues,
+and dynamic model switching are out of scope for this design.
+
+### MegakernelExecutor interface
+
+The following API expresses the dependency and async-completion relationships.
+Type names may change during implementation:
+
+```python
+FFNModel.load(model_config, parallel_context) -> DeviceModelView
+
+MegakernelExecutor.initialize_communication(session_spec, device_context)
+MegakernelExecutor.bind(model_view)          # checks shapes, expert layout,
+                                              # lane capacity, native ABI, device caps
+MegakernelExecutor.prepare(execution_spec)   # JIT, launch params, workspace,
+                                              # descriptor construction
+MegakernelExecutor.submit(step_plan) -> StepCompletion   # AFD sync (ControlPlane present)
+MegakernelExecutor.run_async(stop_token) -> ExecutionCompletion  # AFD async (ControlPlane=None;
+                                                                  # requires backend support)
+StepCompletion.query() / wait()
+```
+
+- `bind` is the gate: if weight shapes, expert layout, lane capacity, or
+  native ABI do not match, it fails loudly. Models that cannot be expressed
+  must fail at bind time — they must not silently fall back to a plain FFN
+  operator.
+- `prepare` is separate from `bind` so that JIT compilation and workspace
+  allocation can happen after topology negotiation but before the hot loop.
+- `submit` does not decompose the kernel's internal communication and compute
+  regions at the Python level.
+- Communication resources and compute scratch are owned by the Executor;
+  weights are owned by FFNModel. If the native kernel requires a single large
+  unified workspace, the adapter layer must declare who allocates it and which
+  views borrow from it — double allocation and double free are not permitted.
+
+### Startup sequence
+
+```
+Service starts
+  → parse model config and parallel config
+  → Worker binds device, initializes compute parallel environment
+  → Runner verifies session preconditions:
+      with ControlPlane  → optional control connection
+      without ControlPlane → Executor communication init handshake
+  → Executor establishes A/F communication domain and transport resources
+  → FFNModel loads and converts weights
+  → Executor binds model view, calls prepare()
+  → coordinated warmup with the Attention side
+  → all required ranks reach READY
+  → with ControlPlane: receive and execute StepPlan loop
+  → without ControlPlane: enter validated async fused-execution path
+```
+
+Lightweight handshake, weight loading, and resource construction may be
+reordered within their dependency constraints. All participants of the same
+collective must be consistent; partial initialization failures must clean up
+the resources that were already created.
+
+### Warmup contract
+
+A distinction must be made between **local preparation** and **cross-endpoint
+warmup**:
+
+- Weight conversion, JIT compilation, and descriptor construction can complete
+  independently on each side.
+- The actual fused megakernel includes communication; it must use a matched
+  two-endpoint warmup protocol.
+- With ControlPlane: the coordinator sends warmup plans.
+- Without ControlPlane: the Executor's communication initialization protocol
+  coordinates with matched device inputs/signals — no ControlPlane is created
+  just for warmup.
+
+Warmup must cover the selected token-count buckets, lane counts, and kernel
+specializations. A local dummy forward without any communication is insufficient
+to declare the communication path ready.
+
+### CUDA graph policy
+
+The target FFN hot path is the whole-step megakernel. It does not depend on an
+FFN whole-step CUDA graph:
+
+- The megakernel persistent path takes precedence over CUDA graph replay.
+- The Attention side may continue using its own CUDA graph independently.
+- No per-layer graph cache, capture, or replay branch is maintained inside the
+  FFN Runner for ordinary (non-megakernel) FFN operators.
+
+If future evidence shows that wrapping the megakernel launch in a CUDA graph
+provides measurable benefit, the capability may be added inside the Executor.
+It is not a current required architectural layer.
+
+The Attention graph and the FFN megakernel must obey the **same** device
+communication ordering, lane layout, and buffer-reuse rules, regardless of
+their independent launch mechanisms.
+
+### Communication domain taxonomy
+
+Three distinct communication responsibilities exist in an AFD deployment:
+
+| Domain | Initialized by | Purpose |
+|---|---|---|
+| **Host control channel** (optional) | ControlPlane, via Runner | When present: carries StepPlan, ready, completion, flush, stop. When `None`: not created. |
+| **FFN compute-parallel environment** | Worker via platform adapter | Weight sharding (TP), required collectives for FFN computation, upstream init requirements |
+| **A/F transport domain** | MegakernelExecutor, organized by Runner | AG↔EG connection, device data exchange, buffer credits, device-level synchronization |
+
+Logically separate does not mean three distinct ProcessGroups are required.
+Specific process group construction and rank mapping must follow the megakernel
+and its communication backend interfaces. The A/F transport domain must be
+compatible with the Attention side's existing parallel environment — it must
+not unconditionally overwrite the default world.
 
 ---
 
