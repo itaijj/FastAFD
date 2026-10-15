@@ -25,6 +25,7 @@ export PYTHONUNBUFFERED=1
 # Cross-pod run: GIN (RDMA) must be enabled so nccl.cu takes the full LSA window path.
 # EP_DISABLE_GIN=0 lets gin_enabled=true when NCCL sees ginType != NONE on the RoCE NIC.
 export EP_DISABLE_GIN="${EP_DISABLE_GIN:-0}"
+export EP_BUFFER_DEBUG="${EP_BUFFER_DEBUG:-1}"
 # NCCL TCP bootstrap must use the routable pod network (eth0), not a RoCE rail.
 export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-eth0}"
 # Pin every rank to mlx5_0 — shared rail NIC on pokprod (phase 4b E3/E5 pass).
