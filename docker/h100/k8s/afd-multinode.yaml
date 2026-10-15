@@ -65,6 +65,7 @@ spec:
           - matchExpressions:
               - {key: nvidia.com/gpu.product, operator: In, values: ["NVIDIA-H100-80GB-HBM3"]}
               - {key: kubernetes.io/hostname, operator: NotIn, values: [${TEMPLATE_EXCLUDE_NODES}]}
+              - {key: kubernetes.io/hostname, operator: In, values: ["${TEMPLATE_HEAD_NODE}"]}
   securityContext:
     fsGroup: ${TEMPLATE_FSGROUP}
   volumes:
@@ -186,6 +187,7 @@ spec:
           - matchExpressions:
               - {key: nvidia.com/gpu.product, operator: In, values: ["NVIDIA-H100-80GB-HBM3"]}
               - {key: kubernetes.io/hostname, operator: NotIn, values: [${TEMPLATE_EXCLUDE_NODES}]}
+              - {key: kubernetes.io/hostname, operator: In, values: ["${TEMPLATE_WORKER_NODE}"]}
     podAntiAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         - labelSelector:
