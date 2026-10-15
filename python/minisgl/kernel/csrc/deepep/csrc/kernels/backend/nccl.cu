@@ -110,7 +110,17 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
         reqs.ginSignalCount = num_ranks + 2 * 2;
         reqs.ginConnectionType = allow_hybrid_mode ? NCCL_GIN_CONNECTION_RAIL: NCCL_GIN_CONNECTION_FULL;
     }
-    NCCL_CHECK(ncclDevCommCreate(comm, &reqs, &dev_comm));
+    // ### PATCH START: skip ncclDevCommCreate when GIN is disabled — it requires
+    // NVLink/NVSwitch symmetric memory which is unavailable between separate K8s pods.
+    // When gin_enabled=false all ranks are in one LSA domain: lsaSize=num_ranks, lsaRank=rank_idx.
+    if (gin_enabled) {
+        NCCL_CHECK(ncclDevCommCreate(comm, &reqs, &dev_comm));
+    } else {
+        dev_comm = {};
+        dev_comm.lsaSize = num_ranks;
+        dev_comm.lsaRank = rank_idx;
+    }
+    // ### PATCH END: skip ncclDevCommCreate when GIN is disabled
 
     // Now we know the NVLink domain size
     num_nvl_ranks = dev_comm.lsaSize, nvl_rank_idx = dev_comm.lsaRank;
