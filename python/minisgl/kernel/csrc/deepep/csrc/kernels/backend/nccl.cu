@@ -110,29 +110,41 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
         reqs.ginSignalCount = num_ranks + 2 * 2;
         reqs.ginConnectionType = allow_hybrid_mode ? NCCL_GIN_CONNECTION_RAIL: NCCL_GIN_CONNECTION_FULL;
     }
-    // ### PATCH START: skip ncclDevCommCreate when GIN is disabled — it requires
-    // NVLink/NVSwitch symmetric memory which is unavailable between separate K8s pods.
-    // When gin_enabled=false all ranks are in one LSA domain: lsaSize=num_ranks, lsaRank=rank_idx.
+    // ### PATCH START: skip all NVLink LSA window APIs when GIN is disabled.
+    // ncclDevCommCreate, ncclCommWindowRegister and ncclGetLsaDevicePointer all
+    // require NVLink/NVSwitch symmetric memory, unavailable between separate K8s pods
+    // connected only by RoCE. When gin_enabled=false each pod is its own NVLink domain;
+    // we allocate plain CUDA memory and self-map; cross-pod transfers use NCCL collective
+    // (no scale-out path is exercised since num_rdma_ranks==1).
     if (gin_enabled) {
         NCCL_CHECK(ncclDevCommCreate(comm, &reqs, &dev_comm));
-    } else {
-        dev_comm = {};
-        dev_comm.lsaSize = num_ranks;
-        dev_comm.lsaRank = rank_idx;
-    }
-    // ### PATCH END: skip ncclDevCommCreate when GIN is disabled
+        num_nvl_ranks = dev_comm.lsaSize, nvl_rank_idx = dev_comm.lsaRank;
+        num_rdma_ranks = num_ranks / num_nvl_ranks, rdma_rank_idx = rank_idx / num_nvl_ranks;
+        EP_HOST_ASSERT(num_ranks % num_nvl_ranks == 0 and nvl_rank_idx == rank_idx % num_nvl_ranks);
+        EP_HOST_ASSERT(rank_idx == rdma_rank_idx * num_nvl_ranks + nvl_rank_idx);
 
-    // Now we know the NVLink domain size
-    num_nvl_ranks = dev_comm.lsaSize, nvl_rank_idx = dev_comm.lsaRank;
-    num_rdma_ranks = num_ranks / num_nvl_ranks, rdma_rank_idx = rank_idx / num_nvl_ranks;
-    EP_HOST_ASSERT(num_ranks % num_nvl_ranks == 0 and nvl_rank_idx == rank_idx % num_nvl_ranks);
-    EP_HOST_ASSERT(rank_idx == rdma_rank_idx * num_nvl_ranks + nvl_rank_idx);
-    // ### PATCH START: allow NVLink-only nodes without NCCL GIN
-    EP_HOST_ASSERT((gin_enabled or num_rdma_ranks == 1) and
-                   "The ranks span more than one NVLink domain, so DeepEP needs NCCL GIN (RDMA) "
-                   "between them, but GIN is unavailable (no RDMA NICs in the pod?) or disabled "
-                   "by EP_DISABLE_GIN=1.");
-    // ### PATCH END: allow NVLink-only nodes without NCCL GIN
+        NCCL_CHECK(ncclMemAlloc(&raw_window_ptr, size));
+        NCCL_CHECK(ncclCommWindowRegister(comm, raw_window_ptr, size, &window, NCCL_WIN_DEFAULT));
+        NCCL_CHECK(ncclGetLsaDevicePointer(window, 0, nvl_rank_idx, &mapped_window_ptr));
+        nvl_window_ptrs.resize(num_nvl_ranks);
+        for (int i = 0; i < num_nvl_ranks; ++i)
+            NCCL_CHECK(ncclGetLsaDevicePointer(window, 0, i, &nvl_window_ptrs[i]));
+    } else {
+        dev_comm       = {};
+        num_nvl_ranks  = num_ranks;
+        nvl_rank_idx   = rank_idx;
+        num_rdma_ranks = 1;
+        rdma_rank_idx  = 0;
+        EP_HOST_ASSERT((gin_enabled or num_rdma_ranks == 1) and
+                       "Ranks span multiple NVLink domains but GIN is disabled.");
+
+        NCCL_CHECK(ncclMemAlloc(&raw_window_ptr, size));
+        mapped_window_ptr = raw_window_ptr;
+        window = nullptr;  // no NVLink window; finalize() guards against null
+        nvl_window_ptrs.resize(num_nvl_ranks, nullptr);
+        nvl_window_ptrs[nvl_rank_idx] = raw_window_ptr;
+    }
+    // ### PATCH END: skip all NVLink LSA window APIs when GIN is disabled
 
     // Calculate scaleout/up domain size
     if (allow_hybrid_mode) {
@@ -143,19 +155,6 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
         scaleout_rank_idx = 0, scaleup_rank_idx = rank_idx;
     }
     is_scaleup_nvlink = num_scaleup_ranks == num_nvl_ranks;
-
-    // Create window
-    // NOTES: `ncclCommWindowRegister` is collective: it internally calls bootstrapBarrier
-    // across all ranks, so no explicit barrier is needed after this call.
-    NCCL_CHECK(ncclMemAlloc(&raw_window_ptr, size));
-    NCCL_CHECK(ncclCommWindowRegister(comm, raw_window_ptr, size, &window, NCCL_WIN_DEFAULT));
-    NCCL_CHECK(ncclGetLsaDevicePointer(window, 0, nvl_rank_idx, &mapped_window_ptr));
-
-    // Get LSA pointers for all LSA peers
-    // TODO: check whether this is correct for network with RDMA
-    nvl_window_ptrs.resize(num_nvl_ranks);
-    for (int i = 0; i < num_nvl_ranks; ++ i)
-        NCCL_CHECK(ncclGetLsaDevicePointer(window, 0, i, &nvl_window_ptrs[i]));
 
     // TODO: push NCCL team to support aligned allocation
     EP_HOST_ASSERT(size % alignment == 0);
@@ -169,12 +168,12 @@ void* NCCLSymmetricMemoryContext::get_sym_ptr(void* ptr, const int& dst_rank_idx
 }
 
 void NCCLSymmetricMemoryContext::finalize() const {
-    // Deregister window and free buffer
-    NCCL_CHECK(ncclCommWindowDeregister(comm, window));
+    // ### PATCH: window/dev_comm are null when gin_enabled=false (no NVLink between pods)
+    if (window != nullptr) {
+        NCCL_CHECK(ncclCommWindowDeregister(comm, window));
+        NCCL_CHECK(ncclDevCommDestroy(comm, &dev_comm));
+    }
     NCCL_CHECK(ncclMemFree(raw_window_ptr));
-
-    // Destroy device communicator
-    NCCL_CHECK(ncclDevCommDestroy(comm, &dev_comm));
 }
 
 }  // namespace deep_ep::nccl
