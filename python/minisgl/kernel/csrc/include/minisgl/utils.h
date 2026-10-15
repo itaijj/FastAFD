@@ -2,7 +2,10 @@
 
 // ref:
 // https://forums.developer.nvidia.com/t/c-20s-source-location-compilation-error-when-using-nvcc-12-1/258026/3
-#ifdef __CUDACC__
+// Only for nvcc < 13: on nvcc 13 + GCC 13 libstdc++ the consteval->constexpr
+// hack makes source_location::current() device-visible under
+// --expt-relaxed-constexpr, and NVVM rejects the resulting IR.
+#if defined(__CUDACC__) && __CUDACC_VER_MAJOR__ < 13
 #pragma push_macro("__cpp_consteval")
 #pragma push_macro("_NODISCARD")
 #pragma push_macro("__builtin_LINE")

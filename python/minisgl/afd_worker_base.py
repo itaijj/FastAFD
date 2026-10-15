@@ -462,6 +462,13 @@ class BaseAfdWorker:
         model_extra = getattr(mc, "model_extra", {})
         self._afd_moe_backend = afd_env("MOE_BACKEND", "deepep")
         if self._afd_moe_backend == "megamoe_m2n":
+            # Checked before any collective so every rank fails consistently.
+            if torch.cuda.get_device_capability()[0] != 10:
+                raise RuntimeError(
+                    "MINISGL_AFD_MOE_BACKEND=megamoe_m2n requires an SM100 (Blackwell) GPU, "
+                    f"got sm_{''.join(map(str, torch.cuda.get_device_capability()))}; "
+                    "use MINISGL_AFD_MOE_BACKEND=deepep on H100"
+                )
             os.environ.setdefault("MINISGL_MEGAMOE_AG_SMS", "24")
             n_shared_experts = int(model_extra.get("n_shared_experts", 0) or 0)
             remote_shared_experts = (

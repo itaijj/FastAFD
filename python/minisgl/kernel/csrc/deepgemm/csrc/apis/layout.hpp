@@ -56,6 +56,25 @@ static torch::Tensor transform_sf_into_required_layout(const torch::Tensor& sf,
     if (sf.scalar_type() == torch::kInt and gran_mn == 1 and (gran_k == 32 or gran_k == 128) and arch_major == 10)
         return check_sf_layout(sf, mn, k, gran_mn, gran_k, num_groups, true, false, torch::kInt);
 
+    // (INT, 1, 128) on SM90: unpack packed UE8M0 to float32, then use SM90 per-row path.
+    // Packed UE8M0: each int32 stores 4 uint8 exponents; float value = 2^exponent =
+    //   reinterpret_cast<float>(uint32_t(ue8m0_byte) << 23).
+    if (sf.scalar_type() == torch::kInt and gran_mn == 1 and gran_k == 128 and arch_major == 9) {
+        // Packed SF is usually MN-major (TMA-aligned); dtype views to uint8 require a unit last-dim stride
+        const auto sf_batched = (sf.dim() == 2 ? sf.unsqueeze(0) : sf).contiguous();
+        // sf_batched shape: [num_groups, mn, packed_sf_k] where packed_sf_k = ceil_div(sf_k, 4)
+        // Unpack: view int32 as uint8 -> cast to int32 -> shift left 23 -> view as float
+        const auto fp32_all = sf_batched.view(torch::kUInt8)
+                                        .to(torch::kInt32)
+                                        .bitwise_left_shift(23)
+                                        .view(torch::kFloat);  // shape: [num_groups, mn, packed_sf_k*4]
+        // Trim to the real sf_k = ceil_div(k, 128)
+        const int sf_k = ceil_div(k, 128);
+        auto fp32_sf = fp32_all.slice(-1, 0, sf_k).contiguous();
+        fp32_sf = (sf.dim() == 2) ? fp32_sf.squeeze(0) : fp32_sf;
+        return get_mn_major_tma_aligned_tensor(fp32_sf);
+    }
+
     DG_HOST_UNREACHABLE("Unknown SF transformation");
 }
 
