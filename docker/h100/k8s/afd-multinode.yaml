@@ -1,0 +1,267 @@
+# Multi-node AFD: headless Service + head Pod + worker Pod
+# Topology: 1 attn node (head, 4 GPUs) + 1 MLP node (worker, 4 GPUs)
+# Deploy with: bash docker/h100/k8s/deploy_afd_multinode.sh
+#
+# Template variables (substituted by deploy_afd_multinode.sh via envsubst):
+#   TEMPLATE_POD        base name  (e.g. h100-afd-mn)
+#   TEMPLATE_FSGROUP    OpenShift fsGroup
+#   TEMPLATE_REPO       git repo URL
+#   TEMPLATE_BRANCH     git branch
+#   TEMPLATE_PVC        PVC name for HF model cache
+#   TEMPLATE_GPU        GPUs per pod (4)
+#   TEMPLATE_ATTN_DP    attn dp size
+#   TEMPLATE_ATTN_TP    attn tp size (= GPUs on head)
+#   TEMPLATE_MLP_DP     mlp dp size
+#   TEMPLATE_MLP_TP     mlp tp size (= GPUs on worker)
+#   TEMPLATE_EP         mlp ep size
+#   TEMPLATE_NUM_PROMPTS / TEMPLATE_PROMPT_LEN / TEMPLATE_MAX_TOKENS
+#   TEMPLATE_KEEP_ALIVE_S
+#   TEMPLATE_RDMA       rdma/roce_gdr count (1)
+#   TEMPLATE_VLLM_ALIGN 1 = run vLLM alignment after AFD
+#   TEMPLATE_EXCLUDE_NODES  hostname list for NotIn affinity
+#   TEMPLATE_RAY_PORT   Ray GCS port (default 6379)
+---
+# Headless Service so head pod is reachable by DNS from the worker pod.
+# DNS name: ${TEMPLATE_POD}-head.<namespace>.svc.cluster.local
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${TEMPLATE_POD}-head
+  labels:
+    app: afd-recipe
+    role: h100-afd-head
+spec:
+  clusterIP: None
+  selector:
+    afd-run: ${TEMPLATE_POD}
+    afd-role: head
+  ports:
+    - name: ray-gcs
+      port: ${TEMPLATE_RAY_PORT}
+      targetPort: ${TEMPLATE_RAY_PORT}
+    - name: ray-object-store
+      port: 8076
+      targetPort: 8076
+    - name: ray-dashboard
+      port: 8265
+      targetPort: 8265
+---
+# HEAD pod — attention ranks + Ray head + minisgl server
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${TEMPLATE_POD}-head
+  labels:
+    app: afd-recipe
+    role: h100-afd-head
+    afd-run: ${TEMPLATE_POD}
+    afd-role: head
+spec:
+  restartPolicy: Never
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - {key: nvidia.com/gpu.product, operator: In, values: ["NVIDIA-H100-80GB-HBM3"]}
+              - {key: kubernetes.io/hostname, operator: NotIn, values: [${TEMPLATE_EXCLUDE_NODES}]}
+  securityContext:
+    fsGroup: ${TEMPLATE_FSGROUP}
+  volumes:
+    - name: work
+      emptyDir: {}
+    - name: dshm
+      emptyDir:
+          medium: Memory
+          sizeLimit: 32Gi
+    - name: model-storage
+      persistentVolumeClaim:
+        claimName: ${TEMPLATE_PVC}
+    - name: entry
+      configMap:
+        name: ${TEMPLATE_POD}-head-entry
+  initContainers:
+    - name: clone
+      image: docker.io/alpine/git:latest
+      env:
+        - {name: HOME, value: /work}
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -e
+          git clone --depth 1 -b "${TEMPLATE_BRANCH}" "${TEMPLATE_REPO}" /work/FastAFD
+          git -C /work/FastAFD rev-parse HEAD > /work/FastAFD/.commit
+          cat /work/FastAFD/.commit
+      volumeMounts:
+        - {name: work, mountPath: /work}
+    - name: fetch-uv
+      image: docker.io/curlimages/curl:latest
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -e
+          mkdir -p /work/bin
+          curl -fsSL https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-musl.tar.gz \
+            | tar -xz -C /work/bin --strip-components=1
+          /work/bin/uv --version
+      volumeMounts:
+        - {name: work, mountPath: /work}
+  containers:
+    - name: afd
+      image: docker.io/nvidia/cuda:13.0.2-devel-ubuntu24.04
+      command: ["/bin/bash", "/entry/afd_entry_head.sh"]
+      env:
+        - {name: GPU_COUNT,        value: "${TEMPLATE_GPU}"}
+        - {name: ATTN_DP_SIZE,     value: "${TEMPLATE_ATTN_DP}"}
+        - {name: ATTN_TP_SIZE,     value: "${TEMPLATE_ATTN_TP}"}
+        - {name: MLP_DP_SIZE,      value: "${TEMPLATE_MLP_DP}"}
+        - {name: MLP_TP_SIZE,      value: "${TEMPLATE_MLP_TP}"}
+        - {name: AFD_MLP_EP_SIZE,  value: "${TEMPLATE_EP}"}
+        - {name: NUM_PROMPTS,      value: "${TEMPLATE_NUM_PROMPTS}"}
+        - {name: PROMPT_LEN,       value: "${TEMPLATE_PROMPT_LEN}"}
+        - {name: MAX_TOKENS,       value: "${TEMPLATE_MAX_TOKENS}"}
+        - {name: RUN_VLLM_ALIGNMENT, value: "${TEMPLATE_VLLM_ALIGN}"}
+        - {name: HF_HOME,          value: "/models/.hf_home"}
+        - {name: KEEP_ALIVE_S,     value: "${TEMPLATE_KEEP_ALIVE_S}"}
+        - {name: RAY_HEAD_PORT,    value: "${TEMPLATE_RAY_PORT}"}
+        # POD_NAMESPACE must be declared before any env var that references $(POD_NAMESPACE)
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        # DNS name of the worker pod via the worker's headless Service
+        - name: WORKER_POD_DNS
+          value: "${TEMPLATE_POD}-worker.$(POD_NAMESPACE).svc.cluster.local"
+      resources:
+        requests:
+          nvidia.com/gpu: "${TEMPLATE_GPU}"
+          rdma/roce_gdr: "${TEMPLATE_RDMA}"
+          cpu: "32"
+          memory: 200Gi
+        limits:
+          nvidia.com/gpu: "${TEMPLATE_GPU}"
+          rdma/roce_gdr: "${TEMPLATE_RDMA}"
+          cpu: "64"
+          memory: 400Gi
+      volumeMounts:
+        - {name: work,          mountPath: /work}
+        - {name: dshm,          mountPath: /dev/shm}
+        - {name: model-storage, mountPath: /models}
+        - {name: entry,         mountPath: /entry, readOnly: true}
+---
+# Headless Service for worker pod (so head can resolve worker IP by DNS too)
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${TEMPLATE_POD}-worker
+  labels:
+    app: afd-recipe
+    role: h100-afd-worker
+spec:
+  clusterIP: None
+  selector:
+    afd-run: ${TEMPLATE_POD}
+    afd-role: worker
+  ports:
+    - name: ray-object-store
+      port: 8076
+      targetPort: 8076
+---
+# WORKER pod — MLP ranks only; joins head's Ray cluster
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${TEMPLATE_POD}-worker
+  labels:
+    app: afd-recipe
+    role: h100-afd-worker
+    afd-run: ${TEMPLATE_POD}
+    afd-role: worker
+spec:
+  restartPolicy: Never
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - {key: nvidia.com/gpu.product, operator: In, values: ["NVIDIA-H100-80GB-HBM3"]}
+              - {key: kubernetes.io/hostname, operator: NotIn, values: [${TEMPLATE_EXCLUDE_NODES}]}
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              afd-run: ${TEMPLATE_POD}
+              afd-role: head
+          topologyKey: kubernetes.io/hostname
+  securityContext:
+    fsGroup: ${TEMPLATE_FSGROUP}
+  volumes:
+    - name: work
+      emptyDir: {}
+    - name: dshm
+      emptyDir:
+          medium: Memory
+          sizeLimit: 32Gi
+    - name: model-storage
+      persistentVolumeClaim:
+        claimName: ${TEMPLATE_PVC}
+    - name: entry
+      configMap:
+        name: ${TEMPLATE_POD}-worker-entry
+  initContainers:
+    - name: clone
+      image: docker.io/alpine/git:latest
+      env:
+        - {name: HOME, value: /work}
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -e
+          git clone --depth 1 -b "${TEMPLATE_BRANCH}" "${TEMPLATE_REPO}" /work/FastAFD
+          git -C /work/FastAFD rev-parse HEAD > /work/FastAFD/.commit
+      volumeMounts:
+        - {name: work, mountPath: /work}
+    - name: fetch-uv
+      image: docker.io/curlimages/curl:latest
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -e
+          mkdir -p /work/bin
+          curl -fsSL https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-musl.tar.gz \
+            | tar -xz -C /work/bin --strip-components=1
+          /work/bin/uv --version
+      volumeMounts:
+        - {name: work, mountPath: /work}
+  containers:
+    - name: afd
+      image: docker.io/nvidia/cuda:13.0.2-devel-ubuntu24.04
+      command: ["/bin/bash", "/entry/afd_entry_worker.sh"]
+      env:
+        - {name: GPU_COUNT,     value: "${TEMPLATE_GPU}"}
+        - {name: KEEP_ALIVE_S,  value: "${TEMPLATE_KEEP_ALIVE_S}"}
+        - {name: RAY_HEAD_PORT, value: "${TEMPLATE_RAY_PORT}"}
+        # POD_NAMESPACE must be declared before any env var that references $(POD_NAMESPACE)
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        # DNS name of the head pod via the head's headless Service
+        - name: HEAD_POD_DNS
+          value: "${TEMPLATE_POD}-head.$(POD_NAMESPACE).svc.cluster.local"
+      resources:
+        requests:
+          nvidia.com/gpu: "${TEMPLATE_GPU}"
+          rdma/roce_gdr: "${TEMPLATE_RDMA}"
+          cpu: "32"
+          memory: 200Gi
+        limits:
+          nvidia.com/gpu: "${TEMPLATE_GPU}"
+          rdma/roce_gdr: "${TEMPLATE_RDMA}"
+          cpu: "64"
+          memory: 400Gi
+      volumeMounts:
+        - {name: work,          mountPath: /work}
+        - {name: dshm,          mountPath: /dev/shm}
+        - {name: model-storage, mountPath: /models}
+        - {name: entry,         mountPath: /entry, readOnly: true}
