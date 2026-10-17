@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Compile-only repro of the minisgl tvm_ffi JIT kernels used by the H100 test.
-#   podman run --rm -v $PWD:/workspace/FastAFD:Z fastafd-h100 bash docker/h100/jit_compile_check.sh
+#   podman run --rm -v "$(pwd)":/workspace/FastAFD:Z fastafd-h100 bash docker/h100/jit_compile_check.sh
 set -uo pipefail
 cd /workspace/FastAFD
 export TVM_FFI_CACHE_DIR=/tmp/tvm_ffi

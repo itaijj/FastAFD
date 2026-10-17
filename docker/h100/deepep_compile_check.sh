@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Compile-only check of the DeepEP V2 extension (nvcc 13, sm_90) without a GPU.
-#   podman run --rm -v $PWD:/workspace/FastAFD:Z fastafd-h100 bash docker/h100/deepep_compile_check.sh
+#   podman run --rm -v "$(pwd)":/workspace/FastAFD:Z fastafd-h100 bash docker/h100/deepep_compile_check.sh
 set -uo pipefail
 cd /workspace/FastAFD
 export MINISGL_DEEPEP_BUILD_DIR="${MINISGL_DEEPEP_BUILD_DIR:-/tmp/deepep_moe}"
