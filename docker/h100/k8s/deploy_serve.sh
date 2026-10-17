@@ -21,6 +21,8 @@
 #   IMAGE        container image; REQUIRED (no default)
 #   MODEL_PATH   HuggingFace model id or PVC path (default: Qwen/Qwen3-30B-A3B-FP8)
 #   RDMA         set to 1 to request rdma/roce_gdr resource (default 1)
+#   HF_SECRET    Secret holding the HF token, optional (default: hf-token-secret)
+#   HF_SECRET_KEY key inside HF_SECRET (default: token)
 #
 # Example -- full 8xH100 topology:
 #   IMAGE=registry.example.com/cuda:13.0.2-devel \
@@ -46,6 +48,8 @@ export TEMPLATE_MLP_TP="${MLP_TP:-1}"
 export TEMPLATE_EP="${EP:-4}"
 export TEMPLATE_SERVE_PORT="${SERVE_PORT:-8000}"
 export TEMPLATE_RAY_CPUS="${RAY_CPUS:-32}"
+export TEMPLATE_HF_SECRET="${HF_SECRET:-hf-token-secret}"
+export TEMPLATE_HF_SECRET_KEY="${HF_SECRET_KEY:-token}"
 
 # NodePort: if NODE_PORT is set, emit "nodePort: <n>"; otherwise omit the line
 # so K8s auto-assigns from 30000-32767.
@@ -110,7 +114,7 @@ envsubst '${TEMPLATE_SERVE_PORT} ${TEMPLATE_NODE_PORT_LINE}' \
 # ---------------------------------------------------------------------------
 echo "=== (re)deploying pod $POD_NAME ==="
 kubectl delete pod "$POD_NAME" --ignore-not-found
-envsubst '${TEMPLATE_IMAGE} ${TEMPLATE_MODEL} ${TEMPLATE_GPU} ${TEMPLATE_PVC} ${TEMPLATE_FSGROUP} ${TEMPLATE_SERVE_PORT} ${TEMPLATE_ATTN_DP} ${TEMPLATE_ATTN_TP} ${TEMPLATE_MLP_DP} ${TEMPLATE_MLP_TP} ${TEMPLATE_EP} ${TEMPLATE_RAY_CPUS} ${TEMPLATE_REPO} ${TEMPLATE_BRANCH}' \
+envsubst '${TEMPLATE_IMAGE} ${TEMPLATE_MODEL} ${TEMPLATE_GPU} ${TEMPLATE_PVC} ${TEMPLATE_FSGROUP} ${TEMPLATE_SERVE_PORT} ${TEMPLATE_ATTN_DP} ${TEMPLATE_ATTN_TP} ${TEMPLATE_MLP_DP} ${TEMPLATE_MLP_TP} ${TEMPLATE_EP} ${TEMPLATE_RAY_CPUS} ${TEMPLATE_REPO} ${TEMPLATE_BRANCH} ${TEMPLATE_HF_SECRET} ${TEMPLATE_HF_SECRET_KEY}' \
   < "$HERE/fastafd-serve-pod.yaml" | kubectl apply -f -
 
 # ---------------------------------------------------------------------------

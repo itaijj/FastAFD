@@ -101,8 +101,8 @@ spec:
         - name: HF_TOKEN
           valueFrom:
             secretKeyRef:
-              name: hf-token-secret
-              key: token
+              name: ${TEMPLATE_HF_SECRET}
+              key: ${TEMPLATE_HF_SECRET_KEY}
               optional: true
       resources:
         requests:

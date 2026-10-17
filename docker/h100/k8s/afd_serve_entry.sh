@@ -154,6 +154,11 @@ import sys
 from huggingface_hub import snapshot_download
 print(snapshot_download(sys.argv[1]))" "$MODEL" || fail "model download"
 
+# The model is now in the HF cache. Go offline so the Ray ranks do not each
+# query the Hub in download_hf_weight()/AutoConfig: a slow Hub response on one
+# rank delays it past the other ranks' DeepEP NVLink barrier timeout.
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+
 # ---------------------------------------------------------------------------
 # 3. Ray head
 # ---------------------------------------------------------------------------
