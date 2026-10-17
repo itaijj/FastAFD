@@ -129,6 +129,38 @@ echo "=== downloading $MODEL ==="
 import sys
 from huggingface_hub import snapshot_download
 print(snapshot_download(sys.argv[1]))" "$MODEL" || fail "model download"
+# Cached now: keep every rank (both pods) off the Hub so none start late.
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+
+# --- userspace RDMA (libibverbs + mlx5 provider) -------------------------------
+# The CUDA base image has no rdma-core, so NCCL cannot load its IB/RoCE plugin,
+# falls back to TCP sockets, finds no GIN, and DeepEP fails cross-node with
+# "Communicator does not support symmetric memory". The pod runs as non-root, so
+# unpack the Ubuntu 24.04 packages under /work/rdma instead of apt-get install.
+install_userspace_rdma() {
+  local root=/work/rdma lib=/work/rdma/usr/lib/x86_64-linux-gnu
+  local ubuntu="${RDMA_DEB_MIRROR:-http://archive.ubuntu.com/ubuntu/pool/main}"
+  local rdma_ver="${RDMA_CORE_DEB_VERSION:-50.0-2ubuntu0.2}" nl_ver="${LIBNL_DEB_VERSION:-3.7.0-0.3build1.1}"
+  mkdir -p "$root/debs"
+  local url
+  for url in \
+      "$ubuntu/r/rdma-core/libibverbs1_${rdma_ver}_amd64.deb" \
+      "$ubuntu/r/rdma-core/ibverbs-providers_${rdma_ver}_amd64.deb" \
+      "$ubuntu/libn/libnl3/libnl-3-200_${nl_ver}_amd64.deb" \
+      "$ubuntu/libn/libnl3/libnl-route-3-200_${nl_ver}_amd64.deb"; do
+    "$PY" -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" \
+      "$url" "$root/debs/$(basename "$url")" || return 1
+    dpkg-deb -x "$root/debs/$(basename "$url")" "$root" || return 1
+  done
+  if LD_LIBRARY_PATH="$lib" ldd "$lib/libibverbs.so.1" "$lib/libibverbs/libmlx5-rdmav34.so" | grep -q "not found"; then
+    return 1
+  fi
+  # libibverbs falls back to dlopen("libmlx5-rdmav34.so") via LD_LIBRARY_PATH.
+  export LD_LIBRARY_PATH="$lib:$lib/libibverbs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export RDMAV_DRIVERS="${RDMAV_DRIVERS:-mlx5}"
+}
+echo "=== installing userspace RDMA libraries (/work/rdma) ==="
+install_userspace_rdma || fail "userspace RDMA install"
 
 # --- Ray HEAD -----------------------------------------------------------------
 RAY_HEAD_PORT="${RAY_HEAD_PORT:-6379}"
@@ -167,8 +199,10 @@ done
 WORKER_IP="$(python -c "import socket; print(socket.gethostbyname('${WORKER_DNS}'))" 2>/dev/null)" \
   || fail "could not resolve WORKER_POD_DNS=$WORKER_DNS"
 
-export MINISGL_AFD_ATTN_NODES="$MY_IP"
-export MINISGL_AFD_MLP_NODES="$WORKER_IP"
+# One entry per DP rank; every attention rank is on this pod, every MLP rank on the worker.
+nodes_csv() { local ip="$1" n="$2" out=""; for ((i = 0; i < n; i++)); do out="${out:+$out,}$ip"; done; echo "$out"; }
+export MINISGL_AFD_ATTN_NODES="$(nodes_csv "$MY_IP" "${ATTN_DP_SIZE:-1}")"
+export MINISGL_AFD_MLP_NODES="$(nodes_csv "$WORKER_IP" "${MLP_DP_SIZE:-1}")"
 echo "=== placement: attn=$MY_IP  mlp=$WORKER_IP ==="
 
 # --- AFD run ------------------------------------------------------------------

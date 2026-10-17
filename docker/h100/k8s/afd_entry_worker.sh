@@ -59,6 +59,36 @@ uv pip install --python "$PY" --no-deps -e . || fail "pip install -e"
 export PYTHONPATH=/work/FastAFD/python
 echo "commit: $(cat .commit 2>/dev/null || echo unknown)"
 
+# --- userspace RDMA (libibverbs + mlx5 provider) -------------------------------
+# The CUDA base image has no rdma-core, so NCCL cannot load its IB/RoCE plugin,
+# falls back to TCP sockets, finds no GIN, and DeepEP fails cross-node with
+# "Communicator does not support symmetric memory". The pod runs as non-root, so
+# unpack the Ubuntu 24.04 packages under /work/rdma instead of apt-get install.
+install_userspace_rdma() {
+  local root=/work/rdma lib=/work/rdma/usr/lib/x86_64-linux-gnu
+  local ubuntu="${RDMA_DEB_MIRROR:-http://archive.ubuntu.com/ubuntu/pool/main}"
+  local rdma_ver="${RDMA_CORE_DEB_VERSION:-50.0-2ubuntu0.2}" nl_ver="${LIBNL_DEB_VERSION:-3.7.0-0.3build1.1}"
+  mkdir -p "$root/debs"
+  local url
+  for url in \
+      "$ubuntu/r/rdma-core/libibverbs1_${rdma_ver}_amd64.deb" \
+      "$ubuntu/r/rdma-core/ibverbs-providers_${rdma_ver}_amd64.deb" \
+      "$ubuntu/libn/libnl3/libnl-3-200_${nl_ver}_amd64.deb" \
+      "$ubuntu/libn/libnl3/libnl-route-3-200_${nl_ver}_amd64.deb"; do
+    "$PY" -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" \
+      "$url" "$root/debs/$(basename "$url")" || return 1
+    dpkg-deb -x "$root/debs/$(basename "$url")" "$root" || return 1
+  done
+  if LD_LIBRARY_PATH="$lib" ldd "$lib/libibverbs.so.1" "$lib/libibverbs/libmlx5-rdmav34.so" | grep -q "not found"; then
+    return 1
+  fi
+  # libibverbs falls back to dlopen("libmlx5-rdmav34.so") via LD_LIBRARY_PATH.
+  export LD_LIBRARY_PATH="$lib:$lib/libibverbs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export RDMAV_DRIVERS="${RDMAV_DRIVERS:-mlx5}"
+}
+echo "=== installing userspace RDMA libraries (/work/rdma) ==="
+install_userspace_rdma || fail "userspace RDMA install"
+
 # --- wait for head Ray GCS to be reachable ------------------------------------
 HEAD_DNS="${HEAD_POD_DNS:-}"
 [ -n "$HEAD_DNS" ] || fail "HEAD_POD_DNS is not set"
@@ -83,6 +113,10 @@ except Exception:
   sleep 5
 done
 echo "  head is reachable."
+
+# The head downloads the model to the shared PVC before it starts Ray, so the
+# cache is complete here; keep the MLP ranks off the Hub.
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 
 # --- join Ray cluster as worker -----------------------------------------------
 RAY_CPUS="${RAY_CPUS:-32}"

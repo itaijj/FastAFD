@@ -20,6 +20,12 @@
 #   TEMPLATE_VLLM_ALIGN 1 = run vLLM alignment after AFD
 #   TEMPLATE_EXCLUDE_NODES  hostname list for NotIn affinity
 #   TEMPLATE_RAY_PORT   Ray GCS port (default 6379)
+#   TEMPLATE_MODEL      HF model id (cached on TEMPLATE_PVC)
+#   TEMPLATE_DEEPEP_TIMEOUT_S  DeepEP CPU/GPU wait timeout (MINISGL_DEEPEP_TIMEOUT_S)
+#   TEMPLATE_HF_SECRET / TEMPLATE_HF_SECRET_KEY  optional Secret holding HF_TOKEN
+#   TEMPLATE_HEAD_NODE_EXPR / TEMPLATE_WORKER_NODE_EXPR  optional hostname pin
+#                       (a matchExpressions entry, or a comment when unpinned)
+# The two pods always land on different nodes (required podAntiAffinity).
 ---
 # Headless Service so head pod is reachable by DNS from the worker pod.
 # DNS name: ${TEMPLATE_POD}-head.<namespace>.svc.cluster.local
@@ -69,7 +75,14 @@ spec:
           - matchExpressions:
               - {key: nvidia.com/gpu.product, operator: In, values: ["NVIDIA-H100-80GB-HBM3"]}
               - {key: kubernetes.io/hostname, operator: NotIn, values: [${TEMPLATE_EXCLUDE_NODES}]}
-              - {key: kubernetes.io/hostname, operator: In, values: ["${TEMPLATE_HEAD_NODE}"]}
+              ${TEMPLATE_HEAD_NODE_EXPR}
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              afd-run: ${TEMPLATE_POD}
+              afd-role: worker
+          topologyKey: kubernetes.io/hostname
   securityContext:
     fsGroup: ${TEMPLATE_FSGROUP}
   volumes:
@@ -85,6 +98,11 @@ spec:
     - name: entry
       configMap:
         name: ${TEMPLATE_POD}-head-entry
+    # Unpushed local changes (deploy_afd_multinode.sh LOCAL_PATCH=1); absent = no-op
+    - name: local-patch
+      configMap:
+        name: ${TEMPLATE_POD}-local-patch
+        optional: true
   initContainers:
     - name: clone
       image: docker.io/alpine/git:latest
@@ -97,8 +115,13 @@ spec:
           git clone --depth 1 -b "${TEMPLATE_BRANCH}" "${TEMPLATE_REPO}" /work/FastAFD
           git -C /work/FastAFD rev-parse HEAD > /work/FastAFD/.commit
           cat /work/FastAFD/.commit
+          if [ -s /local-patch/local.patch ]; then
+            git -C /work/FastAFD apply /local-patch/local.patch
+            echo "applied local patch: $(wc -l < /local-patch/local.patch) lines"
+          fi
       volumeMounts:
         - {name: work, mountPath: /work}
+        - {name: local-patch, mountPath: /local-patch, readOnly: true}
     - name: fetch-uv
       image: docker.io/curlimages/curl:latest
       command: ["/bin/sh", "-c"]
@@ -129,6 +152,14 @@ spec:
         - {name: HF_HOME,          value: "/models/.hf_home"}
         - {name: KEEP_ALIVE_S,     value: "${TEMPLATE_KEEP_ALIVE_S}"}
         - {name: RAY_HEAD_PORT,    value: "${TEMPLATE_RAY_PORT}"}
+        - {name: MODEL_PATH,       value: "${TEMPLATE_MODEL}"}
+        - {name: MINISGL_DEEPEP_TIMEOUT_S, value: "${TEMPLATE_DEEPEP_TIMEOUT_S}"}
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: ${TEMPLATE_HF_SECRET}
+              key: ${TEMPLATE_HF_SECRET_KEY}
+              optional: true
         # POD_NAMESPACE must be declared before any env var that references $(POD_NAMESPACE)
         - name: POD_NAMESPACE
           valueFrom:
@@ -195,7 +226,7 @@ spec:
           - matchExpressions:
               - {key: nvidia.com/gpu.product, operator: In, values: ["NVIDIA-H100-80GB-HBM3"]}
               - {key: kubernetes.io/hostname, operator: NotIn, values: [${TEMPLATE_EXCLUDE_NODES}]}
-              - {key: kubernetes.io/hostname, operator: In, values: ["${TEMPLATE_WORKER_NODE}"]}
+              ${TEMPLATE_WORKER_NODE_EXPR}
     podAntiAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         - labelSelector:
@@ -218,6 +249,11 @@ spec:
     - name: entry
       configMap:
         name: ${TEMPLATE_POD}-worker-entry
+    # Unpushed local changes (deploy_afd_multinode.sh LOCAL_PATCH=1); absent = no-op
+    - name: local-patch
+      configMap:
+        name: ${TEMPLATE_POD}-local-patch
+        optional: true
   initContainers:
     - name: clone
       image: docker.io/alpine/git:latest
@@ -229,8 +265,13 @@ spec:
           set -e
           git clone --depth 1 -b "${TEMPLATE_BRANCH}" "${TEMPLATE_REPO}" /work/FastAFD
           git -C /work/FastAFD rev-parse HEAD > /work/FastAFD/.commit
+          if [ -s /local-patch/local.patch ]; then
+            git -C /work/FastAFD apply /local-patch/local.patch
+            echo "applied local patch: $(wc -l < /local-patch/local.patch) lines"
+          fi
       volumeMounts:
         - {name: work, mountPath: /work}
+        - {name: local-patch, mountPath: /local-patch, readOnly: true}
     - name: fetch-uv
       image: docker.io/curlimages/curl:latest
       command: ["/bin/sh", "-c"]
@@ -251,6 +292,15 @@ spec:
         - {name: GPU_COUNT,     value: "${TEMPLATE_GPU}"}
         - {name: KEEP_ALIVE_S,  value: "${TEMPLATE_KEEP_ALIVE_S}"}
         - {name: RAY_HEAD_PORT, value: "${TEMPLATE_RAY_PORT}"}
+        - {name: HF_HOME,       value: "/models/.hf_home"}
+        - {name: MODEL_PATH,    value: "${TEMPLATE_MODEL}"}
+        - {name: MINISGL_DEEPEP_TIMEOUT_S, value: "${TEMPLATE_DEEPEP_TIMEOUT_S}"}
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: ${TEMPLATE_HF_SECRET}
+              key: ${TEMPLATE_HF_SECRET_KEY}
+              optional: true
         # POD_NAMESPACE must be declared before any env var that references $(POD_NAMESPACE)
         - name: POD_NAMESPACE
           valueFrom:
