@@ -12,10 +12,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 NEED_GPUS="${GPU_COUNT:-4}"
 POLL_INTERVAL_S="${POLL_INTERVAL_S:-60}"
-EXCLUDE_NODES="${EXCLUDE_NODES:-pokprod-b93r43s1}"
+EXCLUDE_NODES="${EXCLUDE_NODES:-}"   # comma-separated hostnames to avoid, e.g. EXCLUDE_NODES=node-a,node-b
 
 echo "=== wait_and_deploy_multinode: need 2 nodes each with >= $NEED_GPUS free GPUs ==="
-echo "    excluded: $EXCLUDE_NODES"
+echo "    excluded: ${EXCLUDE_NODES:-<none>}"
 echo "    polling every ${POLL_INTERVAL_S}s  (Ctrl-C to abort)"
 echo
 
@@ -31,12 +31,14 @@ while true; do
     free=$(( alloc - used ))
     node="$(echo "$line" | awk '{print $1}')"
 
-    # Skip excluded nodes
+    # Skip excluded nodes (guarded: empty arrays trip set -u on bash < 4.4)
     skip=0
-    IFS=',' read -ra excl <<< "$EXCLUDE_NODES"
-    for e in "${excl[@]}"; do
-      [[ "$node" == "$e" ]] && skip=1 && break
-    done
+    if [[ -n "$EXCLUDE_NODES" ]]; then
+      IFS=',' read -ra excl <<< "$EXCLUDE_NODES"
+      for e in "${excl[@]}"; do
+        [[ "$node" == "$e" ]] && skip=1 && break
+      done
+    fi
     (( skip )) && continue
 
     echo "  [$TIMESTAMP] $node  alloc=$alloc  used=$used  free=$free"

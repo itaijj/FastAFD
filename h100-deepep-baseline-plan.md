@@ -145,7 +145,7 @@
 ### Sub-Task 5: End-to-end H100 bring-up and alignment validation
 
 - **Status:** [-] in progress. The AFD run and the vLLM alignment both PASS on 2 AG + 2 EG (H100, k8s pod `h100-afd-run`, commit `3e138ee`). The 4 AG + 4 EG topology and a realistic-prompt alignment run are still to be done.
-- **Findings so far (k8s run on `pokprod-b93r43s3`, namespace `itai-ds2`):**
+- **Findings so far (k8s run on an 8×H100 node `<h100-node>`, namespace `<namespace>`):**
   - Pod entry: `docker/h100/k8s/afd_entry.sh`; deploy with `docker/h100/k8s/deploy_afd.sh`; status helper `docker/h100/k8s/status.sh`.
   - **Ray raylet crash (fixed):** `ray start --num-cpus=$(nproc)` advertised the node's 224 CPUs. Ray prestarted about one worker per CPU and `pthread_create` failed with `EAGAIN`, which killed the raylet. Now capped via `RAY_CPUS` (default 32).
   - **DeepEP `ElasticBuffer` on H100 (fixed):** the constructor asserts `ncclCommQueryProperties().railedGinType != NONE` (`kernels/backend/nccl.cu`). The pod has the RDMA devices (after requesting `rdma/roce_gdr`), but NCCL GIN is still unavailable, so the assert fails.

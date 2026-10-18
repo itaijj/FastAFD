@@ -28,7 +28,7 @@ export TEMPLATE_RDMA="${RDMA:-1}"
 # 1 = install vLLM and score AFD output against it after the AFD run.
 export TEMPLATE_VLLM_ALIGN="${RUN_VLLM_ALIGNMENT:-0}"
 # Nodes known to fail CUDA init (error 802), comma-separated.
-EXCLUDE_NODES="${EXCLUDE_NODES:-pokprod-b93r43s1}"
+EXCLUDE_NODES="${EXCLUDE_NODES:-}"   # comma-separated hostnames to avoid, e.g. EXCLUDE_NODES=node-a,node-b
 export TEMPLATE_EXCLUDE_NODES="\"${EXCLUDE_NODES//,/\", \"}\""
 
 NS="$(kubectl config view --minify -o jsonpath='{..namespace}')"

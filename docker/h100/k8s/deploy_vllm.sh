@@ -21,7 +21,7 @@ export TEMPLATE_MAXLEN="${MAX_MODEL_LEN:-4096}"
 export TEMPLATE_EXTRA_ARGS="${VLLM_EXTRA_ARGS:---enforce-eager --moe-backend triton}"
 export TEMPLATE_KEEP_ALIVE_S="${KEEP_ALIVE_S:-1800}"
 # Nodes known to fail CUDA init (error 802), comma-separated.
-EXCLUDE_NODES="${EXCLUDE_NODES:-pokprod-b93r43s1}"
+EXCLUDE_NODES="${EXCLUDE_NODES:-}"   # comma-separated hostnames to avoid, e.g. EXCLUDE_NODES=node-a,node-b
 export TEMPLATE_EXCLUDE_NODES="\"${EXCLUDE_NODES//,/\", \"}\""
 
 NS="$(kubectl config view --minify -o jsonpath='{..namespace}')"

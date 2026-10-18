@@ -12,7 +12,7 @@ export TEMPLATE_REPO="${REPO_URL:-https://github.com/itaijj/FastAFD.git}"
 export TEMPLATE_BRANCH="${BRANCH:-h100-deepep-baseline}"
 export TEMPLATE_GPU="${GPU_COUNT:-1}"
 # Nodes known to fail CUDA init (error 802: fabric manager not up), comma-separated.
-EXCLUDE_NODES="${EXCLUDE_NODES:-pokprod-b93r43s1}"
+EXCLUDE_NODES="${EXCLUDE_NODES:-}"   # comma-separated hostnames to avoid, e.g. EXCLUDE_NODES=node-a,node-b
 export TEMPLATE_EXCLUDE_NODES="\"${EXCLUDE_NODES//,/\", \"}\""
 
 NS="$(kubectl config view --minify -o jsonpath='{..namespace}')"

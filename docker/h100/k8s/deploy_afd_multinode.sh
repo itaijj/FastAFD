@@ -51,7 +51,7 @@ export TEMPLATE_MODEL="${MODEL_PATH:-Qwen/Qwen3-30B-A3B-FP8}"
 export TEMPLATE_DEEPEP_TIMEOUT_S="${DEEPEP_TIMEOUT_S:-900}"
 export TEMPLATE_HF_SECRET="${HF_SECRET:-hf-token-secret}"
 export TEMPLATE_HF_SECRET_KEY="${HF_SECRET_KEY:-token}"
-EXCLUDE_NODES="${EXCLUDE_NODES:-pokprod-b93r43s1}"
+EXCLUDE_NODES="${EXCLUDE_NODES:-}"   # comma-separated hostnames to avoid, e.g. EXCLUDE_NODES=node-a,node-b
 export TEMPLATE_EXCLUDE_NODES="\"${EXCLUDE_NODES//,/\", \"}\""
 # Optional hostname pins; without them only the anti-affinity applies.
 node_expr() {

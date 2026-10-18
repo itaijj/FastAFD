@@ -28,7 +28,7 @@ export EP_DISABLE_GIN="${EP_DISABLE_GIN:-0}"
 export EP_BUFFER_DEBUG="${EP_BUFFER_DEBUG:-1}"
 # NCCL TCP bootstrap must use the routable pod network (eth0), not a RoCE rail.
 export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-eth0}"
-# Pin every rank to mlx5_0 — shared rail NIC on pokprod (phase 4b E3/E5 pass).
+# Default: pin every rank to mlx5_0 (the shared rail NIC on the validation cluster). Override NCCL_IB_HCA per cluster.
 export NCCL_IB_HCA="${NCCL_IB_HCA:-=mlx5_0}"
 mkdir -p "$HOME" /work/bin /tmp/ray
 
