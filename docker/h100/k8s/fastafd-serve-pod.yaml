@@ -94,6 +94,12 @@ spec:
           value: "${TEMPLATE_SERVE_PORT}"
         - name: RAY_CPUS
           value: "${TEMPLATE_RAY_CPUS}"
+        - name: MINISGL_MAX_RUNNING_REQUESTS
+          value: "${TEMPLATE_MAX_RUNNING_REQUESTS}"
+        - name: AFD_DECODE_GRAPH_BS
+          value: "${TEMPLATE_DECODE_GRAPH_BS}"
+        - name: MINISGL_CUDA_GRAPH_MAX_BS
+          value: "${TEMPLATE_CUDA_GRAPH_MAX_BS}"
         - name: EP_DISABLE_GIN
           value: "1"
         - name: TORCHINDUCTOR_CACHE_DIR

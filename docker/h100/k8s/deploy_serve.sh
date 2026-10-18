@@ -18,6 +18,9 @@
 #   SERVE_PORT   miniSGL API port inside the container (default 8000)
 #   NODE_PORT    K8s NodePort (default: empty = auto-assigned by K8s in 30000-32767)
 #   RAY_CPUS     CPU count advertised to Ray (default 32)
+#   MAX_RUNNING_REQUESTS  server cap on concurrently running requests (default 64)
+#   DECODE_GRAPH_BS       CSV of decode CUDA-graph batch sizes (default 8,16,32,64)
+#   CUDA_GRAPH_MAX_BS     max CUDA-graph batch size (default 64)
 #   IMAGE        container image; REQUIRED (no default)
 #   MODEL_PATH   HuggingFace model id or PVC path (default: Qwen/Qwen3-30B-A3B-FP8)
 #   RDMA         set to 1 to request rdma/roce_gdr resource (default 1)
@@ -28,6 +31,14 @@
 #   IMAGE=registry.example.com/cuda:13.0.2-devel \
 #   GPU_COUNT=8 ATTN_TP=4 MLP_DP=4 EP=4 \
 #   bash docker/h100/k8s/deploy_serve.sh
+#
+# Benchmark presets (concurrency up to 256; see afd-serve-benchmark-plan.md):
+#   config A, 1 node x 4 GPUs:
+#     GPU_COUNT=4 ATTN_TP=2 MLP_DP=2 EP=2 \
+#     MAX_RUNNING_REQUESTS=256 DECODE_GRAPH_BS=8,16,32,64,128,256 CUDA_GRAPH_MAX_BS=256
+#   config B, 1 node x 8 GPUs:
+#     GPU_COUNT=8 ATTN_TP=4 MLP_DP=4 EP=4 \
+#     MAX_RUNNING_REQUESTS=256 DECODE_GRAPH_BS=8,16,32,64,128,256 CUDA_GRAPH_MAX_BS=256
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,6 +59,9 @@ export TEMPLATE_MLP_TP="${MLP_TP:-1}"
 export TEMPLATE_EP="${EP:-4}"
 export TEMPLATE_SERVE_PORT="${SERVE_PORT:-8000}"
 export TEMPLATE_RAY_CPUS="${RAY_CPUS:-32}"
+export TEMPLATE_MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-64}"
+export TEMPLATE_DECODE_GRAPH_BS="${DECODE_GRAPH_BS:-8,16,32,64}"
+export TEMPLATE_CUDA_GRAPH_MAX_BS="${CUDA_GRAPH_MAX_BS:-64}"
 export TEMPLATE_HF_SECRET="${HF_SECRET:-hf-token-secret}"
 export TEMPLATE_HF_SECRET_KEY="${HF_SECRET_KEY:-token}"
 
@@ -114,7 +128,7 @@ envsubst '${TEMPLATE_SERVE_PORT} ${TEMPLATE_NODE_PORT_LINE}' \
 # ---------------------------------------------------------------------------
 echo "=== (re)deploying pod $POD_NAME ==="
 kubectl delete pod "$POD_NAME" --ignore-not-found
-envsubst '${TEMPLATE_IMAGE} ${TEMPLATE_MODEL} ${TEMPLATE_GPU} ${TEMPLATE_PVC} ${TEMPLATE_FSGROUP} ${TEMPLATE_SERVE_PORT} ${TEMPLATE_ATTN_DP} ${TEMPLATE_ATTN_TP} ${TEMPLATE_MLP_DP} ${TEMPLATE_MLP_TP} ${TEMPLATE_EP} ${TEMPLATE_RAY_CPUS} ${TEMPLATE_REPO} ${TEMPLATE_BRANCH} ${TEMPLATE_HF_SECRET} ${TEMPLATE_HF_SECRET_KEY}' \
+envsubst '${TEMPLATE_IMAGE} ${TEMPLATE_MODEL} ${TEMPLATE_GPU} ${TEMPLATE_PVC} ${TEMPLATE_FSGROUP} ${TEMPLATE_SERVE_PORT} ${TEMPLATE_ATTN_DP} ${TEMPLATE_ATTN_TP} ${TEMPLATE_MLP_DP} ${TEMPLATE_MLP_TP} ${TEMPLATE_EP} ${TEMPLATE_RAY_CPUS} ${TEMPLATE_MAX_RUNNING_REQUESTS} ${TEMPLATE_DECODE_GRAPH_BS} ${TEMPLATE_CUDA_GRAPH_MAX_BS} ${TEMPLATE_REPO} ${TEMPLATE_BRANCH} ${TEMPLATE_HF_SECRET} ${TEMPLATE_HF_SECRET_KEY}' \
   < "$HERE/fastafd-serve-pod.yaml" | kubectl apply -f -
 
 # ---------------------------------------------------------------------------
