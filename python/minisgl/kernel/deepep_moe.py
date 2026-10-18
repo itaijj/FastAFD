@@ -446,6 +446,10 @@ class DeepEPMoeElasticBuffer:
             129 if allow_hybrid_mode else 17
         )
         sl_idx = int(os.environ.get("EP_OVERRIDE_RDMA_SL", "3"))
+        # CPU and GPU wait timeouts for the DeepEP buffer. Ranks that JIT-build
+        # kernels on a cold start (or on another node) can reach the first
+        # barrier minutes apart, so this is tunable; 120 s is the upstream value.
+        timeout_s = int(os.environ.get("MINISGL_DEEPEP_TIMEOUT_S", "120"))
         _log(
             "config "
             f"requested_max_tokens={self.requested_num_max_dispatch_tokens_per_rank} "
@@ -454,7 +458,7 @@ class DeepEPMoeElasticBuffer:
             f"deterministic={deterministic} allow_hybrid={allow_hybrid_mode} "
             f"allow_multi_reduce={allow_multiple_reduction} "
             f"prefer_overlap={self.prefer_overlap_with_compute} "
-            f"num_qps={self.num_allocated_qps} sl={sl_idx}"
+            f"num_qps={self.num_allocated_qps} sl={sl_idx} timeout_s={timeout_s}"
         )
         _log("nccl_handle_start")
         self._nccl_handle = _get_nccl_comm_handle(self._module, group)
@@ -487,8 +491,8 @@ class DeepEPMoeElasticBuffer:
             self.prefer_overlap_with_compute,
             sl_idx,
             self.num_allocated_qps,
-            120,
-            120,
+            timeout_s,
+            timeout_s,
             True,
         )
         _log("elastic_buffer_ctor_done")

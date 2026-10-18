@@ -1,0 +1,46 @@
+# H100 (SM90) test image for the FastAFD DeepEP + DeepGEMM baseline.
+# Mirrors environment.cuda130.yml (CUDA 13.0, Python 3.12, torch 2.10.0+cu130)
+# on x86_64. vLLM is not installed; it is only needed for alignment runs.
+#
+# Build (from repo root):
+#   podman build -t fastafd-h100 -f docker/h100/Containerfile .
+# Run the SM90 expert-path test (needs NVIDIA CDI: nvidia-ctk cdi generate):
+#   podman run --rm --device nvidia.com/gpu=0 fastafd-h100
+FROM docker.io/nvidia/cuda:13.0.2-devel-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
+    CUDA_HOME=/usr/local/cuda \
+    CUDA_PATH=/usr/local/cuda \
+    CUDA_NVCC_EXECUTABLE=/usr/local/cuda/bin/nvcc \
+    TORCH_CUDA_ARCH_LIST=9.0a \
+    MINISGL_LOCAL_CACHE_BASE=/cache \
+    MINISGL_DEEPGEMM_BUILD_DIR=/cache/deepgemm \
+    MINISGL_DEEPEP_BUILD_DIR=/cache/deepep_moe \
+    EP_JIT_CACHE_DIR=/cache/deepep_jit \
+    TVM_FFI_CACHE_DIR=/cache/tvm_ffi \
+    FLASHINFER_WORKSPACE_BASE=/cache/flashinfer
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-dev python3-pip python3-venv git ninja-build cmake build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+
+RUN pip install --upgrade "pip>=25" "setuptools>=75" wheel \
+    && pip install --extra-index-url https://download.pytorch.org/whl/cu130 \
+        "torch==2.10.0+cu130" "triton==3.6.0" "nvidia-nccl-cu13==2.28.9" \
+        "flashinfer-python==0.6.6" "ray==2.54.0" "apache-tvm-ffi==0.1.9" \
+        "transformers==4.57.3" huggingface_hub accelerate "pybind11>=2.13" \
+        fastapi uvicorn pyzmq msgpack "pydantic>=2" prompt_toolkit openai \
+    && pip install --force-reinstall --no-deps \
+        "nvidia-nccl-cu13==2.30.4" "setuptools==80.10.2" "fsspec==2026.2.0"
+
+WORKDIR /workspace/FastAFD
+COPY . .
+RUN pip install --no-deps -e .
+
+VOLUME ["/cache"]
+CMD ["python", "scripts/validate/test_h100_deepgemm_psum_moe.py"]

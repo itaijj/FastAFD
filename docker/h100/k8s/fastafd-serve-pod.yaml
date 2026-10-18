@@ -1,0 +1,131 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fastafd-qwen30b
+  labels:
+    app: fastafd-serve
+spec:
+  restartPolicy: Always
+  securityContext:
+    fsGroup: ${TEMPLATE_FSGROUP}
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - {key: nvidia.com/gpu.product, operator: In, values: ["NVIDIA-H100-80GB-HBM3"]}
+  volumes:
+    - name: model-storage
+      persistentVolumeClaim:
+        claimName: ${TEMPLATE_PVC}
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 32Gi
+    - name: work
+      emptyDir: {}
+    - name: serve-entry-script
+      configMap:
+        name: fastafd-serve-entry
+        defaultMode: 0755
+  initContainers:
+    - name: clone
+      image: docker.io/alpine/git:latest
+      env:
+        - {name: HOME, value: /work}
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -e
+          git clone --depth 1 -b "${TEMPLATE_BRANCH}" "${TEMPLATE_REPO}" /work/FastAFD
+          git -C /work/FastAFD rev-parse HEAD > /work/FastAFD/.commit
+          cat /work/FastAFD/.commit
+      volumeMounts:
+        - {name: work, mountPath: /work}
+    - name: fetch-uv
+      image: docker.io/curlimages/curl:latest
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -e
+          mkdir -p /work/bin
+          curl -fsSL https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-musl.tar.gz \
+            | tar -xz -C /work/bin --strip-components=1
+          /work/bin/uv --version
+      volumeMounts:
+        - {name: work, mountPath: /work}
+  containers:
+    - name: afd
+      image: ${TEMPLATE_IMAGE}
+      imagePullPolicy: Always
+      command:
+        - /usr/bin/bash
+        - /serve-entry/afd_serve_entry.sh
+      readinessProbe:
+        httpGet:
+          path: /v1/models
+          port: ${TEMPLATE_SERVE_PORT}
+        initialDelaySeconds: 30
+        periodSeconds: 15
+        failureThreshold: 120   # allow up to 30 min for JIT build + graph capture
+        timeoutSeconds: 10
+      env:
+        - name: USER
+          value: "vllm"
+        - name: HOME
+          value: "/work/home"
+        - name: MODEL_PATH
+          value: "${TEMPLATE_MODEL}"
+        - name: HF_HOME
+          value: "/models/.hf_home"
+        - name: GPU_COUNT
+          value: "${TEMPLATE_GPU}"
+        - name: ATTN_DP_SIZE
+          value: "${TEMPLATE_ATTN_DP}"
+        - name: ATTN_TP_SIZE
+          value: "${TEMPLATE_ATTN_TP}"
+        - name: MLP_DP_SIZE
+          value: "${TEMPLATE_MLP_DP}"
+        - name: MLP_TP_SIZE
+          value: "${TEMPLATE_MLP_TP}"
+        - name: AFD_MLP_EP_SIZE
+          value: "${TEMPLATE_EP}"
+        - name: SERVE_PORT
+          value: "${TEMPLATE_SERVE_PORT}"
+        - name: RAY_CPUS
+          value: "${TEMPLATE_RAY_CPUS}"
+        - name: MINISGL_MAX_RUNNING_REQUESTS
+          value: "${TEMPLATE_MAX_RUNNING_REQUESTS}"
+        - name: AFD_DECODE_GRAPH_BS
+          value: "${TEMPLATE_DECODE_GRAPH_BS}"
+        - name: MINISGL_CUDA_GRAPH_MAX_BS
+          value: "${TEMPLATE_CUDA_GRAPH_MAX_BS}"
+        - name: EP_DISABLE_GIN
+          value: "1"
+        - name: TORCHINDUCTOR_CACHE_DIR
+          value: "/work/inductor"
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: ${TEMPLATE_HF_SECRET}
+              key: ${TEMPLATE_HF_SECRET_KEY}
+              optional: true
+      resources:
+        requests:
+          nvidia.com/gpu: "${TEMPLATE_GPU}"
+          cpu: "16"
+          memory: 128Gi
+        limits:
+          nvidia.com/gpu: "${TEMPLATE_GPU}"
+          cpu: "32"
+          memory: 200Gi
+      volumeMounts:
+        - name: model-storage
+          mountPath: /models
+        - name: dshm
+          mountPath: /dev/shm
+        - name: work
+          mountPath: /work
+        - name: serve-entry-script
+          mountPath: /serve-entry
+          readOnly: true

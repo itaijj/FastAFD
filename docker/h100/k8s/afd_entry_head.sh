@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+# Runs on the HEAD pod of a 2-pod multi-node AFD run.
+# Role: attention-only node (ATTN_DP=1 TP=4 → 4 GPUs).
+#
+# Steps:
+#  1. Install Python 3.12 + deps (same as afd_entry.sh)
+#  2. Start Ray HEAD (exposes GCS on port 6379 for the worker pod to join)
+#  3. Wait until the worker pod's Ray node is visible in the cluster
+#  4. Resolve own IP and worker IP; export MINISGL_AFD_ATTN_NODES / MINISGL_AFD_MLP_NODES
+#  5. Run the AFD launch script (server lives here; workers are placed by node env vars)
+#
+# Multi-node topology: ATTN_DP=1 ATTN_TP=4 on this pod, MLP_DP=1 MLP_TP=4 EP=4 on worker.
+# DeepEP cross-node dispatch uses RDMA/RoCE (EP_DISABLE_GIN=0, rdma/roce_gdr in pod spec).
+#
+# Environment variables injected by afd-multinode.yaml:
+#   GPU_COUNT, ATTN_DP_SIZE, ATTN_TP_SIZE, MLP_DP_SIZE, MLP_TP_SIZE, AFD_MLP_EP_SIZE,
+#   RAY_HEAD_PORT (default 6379), WORKER_POD_DNS, RUN_VLLM_ALIGNMENT, HF_HOME, KEEP_ALIVE_S
+set -uo pipefail
+
+export HOME=/work/home PATH=/work/bin:$PATH
+export UV_CACHE_DIR=/work/uv-cache UV_PYTHON_INSTALL_DIR=/work/python
+export CUDA_HOME=/usr/local/cuda CUDA_PATH=/usr/local/cuda CUDA_13_HOME=/usr/local/cuda
+export CUDA_NVCC_EXECUTABLE=/usr/local/cuda/bin/nvcc TORCH_CUDA_ARCH_LIST=9.0a
+export MAX_JOBS="${MAX_JOBS:-16}" RAY_TMPDIR=/tmp/ray RAY_DEDUP_LOGS=0
+export CONDA_DEFAULT_ENV=minisgl-cuda130
+export PYTHONUNBUFFERED=1
+# Cross-pod run: GIN (RDMA) must be enabled so nccl.cu takes the full LSA window path.
+# EP_DISABLE_GIN=0 lets gin_enabled=true when NCCL sees ginType != NONE on the RoCE NIC.
+export EP_DISABLE_GIN="${EP_DISABLE_GIN:-0}"
+export EP_BUFFER_DEBUG="${EP_BUFFER_DEBUG:-1}"
+# NCCL TCP bootstrap must use the routable pod network (eth0), not a RoCE rail.
+export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-eth0}"
+# Default: pin every rank to mlx5_0 (the shared rail NIC on the validation cluster). Override NCCL_IB_HCA per cluster.
+export NCCL_IB_HCA="${NCCL_IB_HCA:-=mlx5_0}"
+mkdir -p "$HOME" /work/bin /tmp/ray
+
+fail() { echo "ERROR: $*"; echo "=== AFD RUN FAIL ==="; exit 1; }
+
+echo "=== GPUs (head/attn node) ==="
+nvidia-smi -L || fail "no GPU visible"
+
+echo "=== env setup ==="
+uv python install 3.12 || fail "uv python install"
+uv venv /work/venv --python 3.12 || fail "uv venv"
+PY=/work/venv/bin/python
+uv pip install --python "$PY" --index-strategy unsafe-best-match \
+  --extra-index-url https://download.pytorch.org/whl/cu130 \
+  "torch==2.10.0+cu130" "triton==3.6.0" "nvidia-nccl-cu13==2.28.9" \
+  "flashinfer-python==0.6.6" "ray==2.54.0" "apache-tvm-ffi==0.1.9" \
+  "transformers==4.57.3" huggingface_hub accelerate modelscope "pybind11>=2.13" \
+  "setuptools>=75" wheel ninja fastapi uvicorn pyzmq msgpack "pydantic>=2" \
+  prompt_toolkit openai \
+  || fail "pip install"
+if [ "${RUN_VLLM_ALIGNMENT:-0}" = "1" ]; then
+  echo "=== installing vLLM 0.19.0+cu130 (alignment) ==="
+  uv pip install --python "$PY" --index-strategy unsafe-best-match \
+    --extra-index-url https://download.pytorch.org/whl/cu130 \
+    "https://github.com/vllm-project/vllm/releases/download/v0.19.0/vllm-0.19.0+cu130-cp38-abi3-manylinux_2_35_x86_64.whl" \
+    || fail "vllm install"
+fi
+uv pip install --python "$PY" --reinstall --no-deps \
+  "nvidia-nccl-cu13==2.30.4" "setuptools==80.10.2" "fsspec==2026.2.0" \
+  || fail "pip overrides"
+export PATH=/work/venv/bin:/work/bin:$PATH
+
+cd /work/FastAFD || fail "missing checkout"
+uv pip install --python "$PY" --no-deps -e . || fail "pip install -e"
+export PYTHONPATH=/work/FastAFD/python
+echo "commit: $(cat .commit 2>/dev/null || echo unknown)"
+
+# --- shims --------------------------------------------------------------------
+cat > /work/bin/_procshim.py <<'EOF'
+import os, sys, urllib.request
+
+def state_and_ppid(pid):
+    try:
+        data = open(f"/proc/{pid}/stat").read()
+    except OSError:
+        return None
+    rest = data.rpartition(")")[2].split()
+    return rest[0], int(rest[1])
+
+def ps(argv):
+    if "-p" in argv:
+        pid = argv[argv.index("-p") + 1]
+        info = state_and_ppid(pid)
+        if info is None:
+            return 1
+        print(info[0])
+        return 0
+    return 0
+
+def pgrep(argv):
+    if "-P" not in argv:
+        return 1
+    parent = int(argv[argv.index("-P") + 1])
+    found = False
+    for name in os.listdir("/proc"):
+        if name.isdigit():
+            info = state_and_ppid(name)
+            if info and info[1] == parent:
+                print(name)
+                found = True
+    return 0 if found else 1
+
+def curl(argv):
+    urls = [a for a in argv if a.startswith("http")]
+    if not urls:
+        return 2
+    try:
+        urllib.request.urlopen(urls[0], timeout=10).read()
+        return 0
+    except Exception:
+        return 22
+
+if __name__ == "__main__":
+    tool = os.path.basename(sys.argv[1])
+    sys.exit({"ps": ps, "pgrep": pgrep, "curl": curl}[tool](sys.argv[2:]))
+EOF
+for t in ps pgrep curl; do
+  printf '#!/bin/sh\nexec /work/venv/bin/python /work/bin/_procshim.py %s "$@"\n' "$t" > "/work/bin/$t"
+  chmod +x "/work/bin/$t"
+done
+
+# --- model download -----------------------------------------------------------
+MODEL="${MODEL_PATH:-Qwen/Qwen3-30B-A3B-FP8}"
+echo "=== downloading $MODEL ==="
+"$PY" -c "
+import sys
+from huggingface_hub import snapshot_download
+print(snapshot_download(sys.argv[1]))" "$MODEL" || fail "model download"
+# Cached now: keep every rank (both pods) off the Hub so none start late.
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+
+# --- userspace RDMA (libibverbs + mlx5 provider) -------------------------------
+# The CUDA base image has no rdma-core, so NCCL cannot load its IB/RoCE plugin,
+# falls back to TCP sockets, finds no GIN, and DeepEP fails cross-node with
+# "Communicator does not support symmetric memory". The pod runs as non-root, so
+# unpack the Ubuntu 24.04 packages under /work/rdma instead of apt-get install.
+install_userspace_rdma() {
+  local root=/work/rdma lib=/work/rdma/usr/lib/x86_64-linux-gnu
+  local ubuntu="${RDMA_DEB_MIRROR:-http://archive.ubuntu.com/ubuntu/pool/main}"
+  local rdma_ver="${RDMA_CORE_DEB_VERSION:-50.0-2ubuntu0.2}" nl_ver="${LIBNL_DEB_VERSION:-3.7.0-0.3build1.1}"
+  mkdir -p "$root/debs"
+  local url
+  for url in \
+      "$ubuntu/r/rdma-core/libibverbs1_${rdma_ver}_amd64.deb" \
+      "$ubuntu/r/rdma-core/ibverbs-providers_${rdma_ver}_amd64.deb" \
+      "$ubuntu/libn/libnl3/libnl-3-200_${nl_ver}_amd64.deb" \
+      "$ubuntu/libn/libnl3/libnl-route-3-200_${nl_ver}_amd64.deb"; do
+    "$PY" -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" \
+      "$url" "$root/debs/$(basename "$url")" || return 1
+    dpkg-deb -x "$root/debs/$(basename "$url")" "$root" || return 1
+  done
+  if LD_LIBRARY_PATH="$lib" ldd "$lib/libibverbs.so.1" "$lib/libibverbs/libmlx5-rdmav34.so" | grep -q "not found"; then
+    return 1
+  fi
+  # libibverbs falls back to dlopen("libmlx5-rdmav34.so") via LD_LIBRARY_PATH.
+  export LD_LIBRARY_PATH="$lib:$lib/libibverbs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export RDMAV_DRIVERS="${RDMAV_DRIVERS:-mlx5}"
+}
+echo "=== installing userspace RDMA libraries (/work/rdma) ==="
+install_userspace_rdma || fail "userspace RDMA install"
+
+# --- Ray HEAD -----------------------------------------------------------------
+RAY_HEAD_PORT="${RAY_HEAD_PORT:-6379}"
+RAY_CPUS="${RAY_CPUS:-32}"
+MY_IP="$(hostname -I | awk '{print $1}')"
+echo "=== ray start --head on $MY_IP:$RAY_HEAD_PORT (gpus=$GPU_COUNT cpus=$RAY_CPUS) ==="
+ray start --head \
+  --num-gpus="$GPU_COUNT" \
+  --num-cpus="$RAY_CPUS" \
+  --port="$RAY_HEAD_PORT" \
+  --object-store-memory=2000000000 \
+  --include-dashboard=false \
+  --disable-usage-stats \
+  || fail "ray start head"
+
+# --- Wait for worker to join --------------------------------------------------
+WORKER_DNS="${WORKER_POD_DNS:-}"
+[ -n "$WORKER_DNS" ] || fail "WORKER_POD_DNS is not set"
+echo "=== waiting for worker ($WORKER_DNS) to join Ray cluster ==="
+WAIT_WORKER_S="${WAIT_WORKER_S:-600}"
+deadline=$(( SECONDS + WAIT_WORKER_S ))
+while true; do
+  node_count="$("$PY" -c "import ray; ray.init(address='auto', ignore_reinit_error=True); print(sum(1 for n in ray.nodes() if n.get('Alive')))" 2>/dev/null || echo 0)"
+  echo "  live Ray nodes: $node_count (need 2)"
+  if [ "$node_count" -ge 2 ] 2>/dev/null; then
+    echo "  worker joined."
+    break
+  fi
+  if (( SECONDS >= deadline )); then
+    fail "worker did not join within ${WAIT_WORKER_S}s"
+  fi
+  sleep 5
+done
+
+# Resolve worker IP from DNS (the headless Service gives pod IP directly)
+WORKER_IP="$(python -c "import socket; print(socket.gethostbyname('${WORKER_DNS}'))" 2>/dev/null)" \
+  || fail "could not resolve WORKER_POD_DNS=$WORKER_DNS"
+
+# One entry per DP rank; every attention rank is on this pod, every MLP rank on the worker.
+nodes_csv() { local ip="$1" n="$2" out=""; for ((i = 0; i < n; i++)); do out="${out:+$out,}$ip"; done; echo "$out"; }
+export MINISGL_AFD_ATTN_NODES="$(nodes_csv "$MY_IP" "${ATTN_DP_SIZE:-1}")"
+export MINISGL_AFD_MLP_NODES="$(nodes_csv "$WORKER_IP" "${MLP_DP_SIZE:-1}")"
+echo "=== placement: attn=$MY_IP  mlp=$WORKER_IP ==="
+
+# --- AFD run ------------------------------------------------------------------
+export ATTN_DP_SIZE="${ATTN_DP_SIZE:-1}"
+export ATTN_TP_SIZE="${ATTN_TP_SIZE:-4}"
+export MLP_DP_SIZE="${MLP_DP_SIZE:-1}"
+export MLP_TP_SIZE="${MLP_TP_SIZE:-4}"
+export AFD_MLP_EP_SIZE="${AFD_MLP_EP_SIZE:-4}"
+export CLEAN_FIRST=0 CLEAN_AFTER=0
+export RUN_VLLM_ALIGNMENT="${RUN_VLLM_ALIGNMENT:-0}"
+export PROMPT_KIND="${PROMPT_KIND:-hello}"
+export MODEL_PATH="$MODEL"
+
+echo "=== running H100 AFD (attn dp${ATTN_DP_SIZE}/tp${ATTN_TP_SIZE} on $MY_IP, mlp dp${MLP_DP_SIZE}/tp${MLP_TP_SIZE}/ep${AFD_MLP_EP_SIZE} on $WORKER_IP) ==="
+bash scripts/experiments/afd/qwen3_30b/run_afd_qwen3_30b_a3b_fp8_h100_1node_deepep_alignment.sh
+rc=$?
+
+echo "=== key log lines ==="
+RUN_DIR="$(ls -dt reports/afd_* 2>/dev/null | head -1)"
+echo "run_dir=$RUN_DIR"
+if [ -n "$RUN_DIR" ]; then
+  grep -rhE "new_afd_deepep|afd_deepep_adapters|deepep_extension:(build_done|init_jit_done)|afd_(eg|ag)_decode_graph|graph (capture|replay)|sm_90a|Traceback|Error" \
+    "$RUN_DIR"/afd.log "$RUN_DIR"/ray_logs 2>/dev/null | cut -c1-300 | sort -u | head -80
+  echo "--- sample.log tail ---"; tail -n 30 "$RUN_DIR/sample.log" 2>/dev/null
+  echo "--- afd.log tail ---"; tail -n 60 "$RUN_DIR/afd.log" 2>/dev/null | cut -c1-300
+fi
+[ "$rc" = "0" ] && echo "=== AFD RUN PASS ===" || echo "=== AFD RUN FAIL (rc=$rc) ==="
+
+KEEP="${KEEP_ALIVE_S:-900}"
+echo "=== keeping pod alive ${KEEP}s ==="
+sleep "$KEEP"
+exit "$rc"
