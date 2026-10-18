@@ -6,8 +6,8 @@
 #   bash docker/h100/k8s/deploy_serve.sh
 #
 # Key overrides (all optional):
-#   REPO_URL     git repo to clone for the FastAFD checkout (default: ronenkat/FastAFD on GitHub)
-#   BRANCH       branch/tag to use (default: fastafd-4xh100-ronenkat-test1)
+#   REPO_URL     git repo to clone for the FastAFD checkout (default: itaijj/FastAFD on GitHub)
+#   BRANCH       branch/tag to use (default: h100-deepep-baseline)
 #   PVC_NAME     name of the PVC holding the HF model cache (default: deepseek-v2-lite-pvc)
 #   GPU_COUNT    GPUs to request; default 8 (4 AG + 4 EG)
 #   ATTN_DP      attention DP size (default 1)
@@ -37,8 +37,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ---------------------------------------------------------------------------
 export TEMPLATE_IMAGE="${IMAGE:?IMAGE must be set to the container image}"
 export TEMPLATE_MODEL="${MODEL_PATH:-Qwen/Qwen3-30B-A3B-FP8}"
-export TEMPLATE_REPO="${REPO_URL:-https://github.com/ronenkat/FastAFD.git}"
-export TEMPLATE_BRANCH="${BRANCH:-fastafd-4xh100-ronenkat-test1}"
+export TEMPLATE_REPO="${REPO_URL:-https://github.com/itaijj/FastAFD.git}"
+export TEMPLATE_BRANCH="${BRANCH:-h100-deepep-baseline}"
 export TEMPLATE_PVC="${PVC_NAME:-deepseek-v2-lite-pvc}"
 export TEMPLATE_GPU="${GPU_COUNT:-8}"
 export TEMPLATE_ATTN_DP="${ATTN_DP:-1}"
